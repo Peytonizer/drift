@@ -1,0 +1,13 @@
+{
+  "domain": "drift",
+  "name": "Drift",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "after_dependencies": ["weather", "automation", "recorder"],
+  "documentation": "https://github.com/Peytonizer/drift",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/Peytonizer/drift/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

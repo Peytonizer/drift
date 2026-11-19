@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "drift"
 pkg = types.ModuleType("sc")
 pkg.__path__ = [str(ROOT)]
 sys.modules["sc"] = pkg
-for name in ("const", "model", "planner", "energy", "review"):
+for name in ("const", "model", "planner", "energy", "review", "tog"):
     spec = importlib.util.spec_from_file_location(f"sc.{name}", ROOT / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"sc.{name}"] = mod
@@ -263,3 +263,20 @@ def test_review_and_suggestions():
     assert "compressor starts" in text and "pre-start lead" in text and "solar pre-cool" in text
     assert nights[0]["est_cost"] == round(4.5 * 0.3 + 0.5 * 0.05, 2)
 
+
+from sc.tog import DEFAULT_CHART, band_for, chart_from_options, recommend  # noqa: E402
+
+
+def test_tog_bands():
+    assert band_for("1.0", DEFAULT_CHART) == (20.5, 23.5)
+    assert band_for("0.2", DEFAULT_CHART) == (24.5, 26.5)
+    assert band_for("2.5", DEFAULT_CHART, 0.0) == (16.0, 20.0)
+    chart = chart_from_options({"tog_1_0_min": 21, "tog_1_0_max": 23})
+    assert band_for("1.0", chart) == (21.5, 22.5)
+
+
+def test_tog_recommendation_follows_natural_overnight_temps():
+    assert recommend([23.8, 23.0, 22.4, 21.9, 21.5, 21.2], DEFAULT_CHART)["tog"] == "1.0"
+    assert recommend([26.5, 26.0, 25.6, 25.2, 24.9], DEFAULT_CHART)["tog"] == "0.2"
+    assert recommend([19.5, 18.4, 17.6, 17.0], DEFAULT_CHART)["tog"] == "2.5"
+    assert recommend([], DEFAULT_CHART) is None
