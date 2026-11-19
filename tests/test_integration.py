@@ -67,6 +67,7 @@ async def _config_flow(hass):
             "tier1_sensor": "sensor.nursery_temperature",
             "tier2_zones": ["climate.ac_master"],
             "tier3_zones": ["climate.ac_office", "climate.ac_lounge", "climate.ac_living"],
+            "constant_zones": ["climate.ac_lounge", "climate.ac_living"],
         },
     )
     assert r["step_id"] == "energy"
@@ -318,3 +319,12 @@ async def test_tier1_leaving_band_triggers_an_immediate_check(hass, freezer):
     assert _main_cmds(set_mode) == ["cool"]  # hard limit, acted on without waiting for the 5-minute cycle
     await hass.config_entries.async_unload(entry.entry_id)
 
+
+
+
+async def test_constant_zones_are_never_closed_when_running(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    closed = [c.data["entity_id"] for c in set_mode if c.data.get("hvac_mode") == "off" and c.data["entity_id"] != "climate.ac"]
+    assert "climate.ac_office" in closed  # an ordinary tier 3 zone is closed
+    assert "climate.ac_lounge" not in closed and "climate.ac_living" not in closed
+    await hass.config_entries.async_unload(entry.entry_id)

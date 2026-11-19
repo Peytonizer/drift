@@ -14,6 +14,7 @@ Status: unreleased. Installed and running in shadow mode.
   - Tier 1 (e.g. a child's bedroom) is held tightly in band, and its zone is the MyZone.
   - Tier 2 (e.g. the main bedroom) gets air when it's drifting.
   - Tier 3 (the rest) stays shut unless it's near the edge of its wide band, or needed to keep a minimum number of zones open for the ducts.
+  - Constant zones (the AC's pressure-relief zones, marked C on the wall panel) are never switched off, so the AC's own controller can always open them.
 - **Sleepwear (TOG) mode.** Pick the TOG of the sleep suit or bag being worn tonight, and the tier 1 band follows the chart. At a set time each afternoon it suggests the TOG that suits the room's natural temperature tonight, which means the least AC work.
 - **Solar pre-cool.** On hot afternoons with spare solar, it cools the house harder before evening.
 - **Tracks energy.** It learns the AC's power draw from the step change on a grid meter each time the AC starts or stops. It then splits the AC's energy into solar and grid.
@@ -38,6 +39,7 @@ Then go to **Settings → Devices & services → Add integration → Drift**.
 | Zones | Tier 1 zone (+ optional room sensor) | `climate.ac_bedroom_1` / `sensor.bedroom_1_temperature` |
 | | Tier 2 zones | `climate.ac_main_bedroom` |
 | | Tier 3 zones | everything else |
+| | Constant zones | the zones marked C on the wall panel |
 | Energy | Grid meter power (whole house) | e.g. a SolarEdge meter `…_ac_power` (import negative) |
 | | Meter phase the AC is on | e.g. `…_ac_power_b` |
 | | Automations to pause | any existing AC automations it replaces |
@@ -80,6 +82,10 @@ The defaults follow Love to Dream's Australian ratings. Brands differ, so edit t
 | `sensor.drift_tuning_suggestions` | Suggestions plus 7-night totals. |
 | `sensor.drift_thermal_model_samples` | What the model has learned for each room, and what the history training used (diagnostic). |
 | `button.drift_relearn_room_models_from_history` | Retrain every room's model from the last week of history. |
+
+## Ductwork
+
+Drift uses only the controls the wall panel has: system mode and setpoint, MyZone, and each zone's on/off and setpoint. It never sets damper percentages, fan speed or the installer's constant-zone settings, so the AC's own pressure relief stays in charge. On top of that it keeps at least three zones open while running (adjustable) and never switches off a zone listed as a constant zone.
 
 ## Notes
 

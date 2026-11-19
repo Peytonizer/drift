@@ -45,6 +45,7 @@ from .const import (
     CONF_TIER1_ZONE,
     CONF_TIER2_ZONES,
     CONF_TIER3_ZONES,
+    CONF_CONSTANT_ZONES,
     CONF_TOLERANCE,
     CONF_WEATHER,
     CONTROL_INTERVAL_MIN,
@@ -79,11 +80,12 @@ def _parse_time(v: str) -> time:
 
 
 class Zone:
-    def __init__(self, climate_id: str, tier: int, sensor_id: str | None, name: str) -> None:
+    def __init__(self, climate_id: str, tier: int, sensor_id: str | None, name: str, constant: bool = False) -> None:
         self.climate_id = climate_id
         self.tier = tier
         self.sensor_id = sensor_id
         self.name = name
+        self.constant = constant
         self.prev: tuple[datetime, float] | None = None
 
 
@@ -154,15 +156,16 @@ class DriftController:
             name = st.attributes.get("friendly_name", eid) if st else eid
             return name[3:] if name.startswith("AC ") else name
 
+        constants = set(self.cfg.get(CONF_CONSTANT_ZONES) or [])
         t1 = self.cfg.get(CONF_TIER1_ZONE)
         if t1:
-            self.zones.append(Zone(t1, 1, self.cfg.get(CONF_TIER1_SENSOR), nm(t1)))
+            self.zones.append(Zone(t1, 1, self.cfg.get(CONF_TIER1_SENSOR), nm(t1), t1 in constants))
         for eid in self.cfg.get(CONF_TIER2_ZONES, []) or []:
             if eid != t1:
-                self.zones.append(Zone(eid, 2, None, nm(eid)))
+                self.zones.append(Zone(eid, 2, None, nm(eid), eid in constants))
         for eid in self.cfg.get(CONF_TIER3_ZONES, []) or []:
             if eid != t1 and eid not in (self.cfg.get(CONF_TIER2_ZONES) or []):
-                self.zones.append(Zone(eid, 3, None, nm(eid)))
+                self.zones.append(Zone(eid, 3, None, nm(eid), eid in constants))
 
     async def async_start(self) -> None:
         data = await self._store.async_load() or {}
@@ -684,7 +687,10 @@ class DriftController:
 
             inp = PlanInput(
                 now=now,
-                zones=[ZoneInput(z.climate_id, z.name, z.tier, self.zone_temp(z), self.models[z.climate_id]) for z in self.zones],
+                zones=[
+                    ZoneInput(z.climate_id, z.name, z.tier, self.zone_temp(z), self.models[z.climate_id], z.constant)
+                    for z in self.zones
+                ],
                 forecast=self.forecast,
                 outdoor_now=self.outdoor,
                 cloud_now=self.cloud,
@@ -827,7 +833,7 @@ class DriftController:
                     await self._call("climate", "set_hvac_mode", {"entity_id": z.climate_id, "hvac_mode": on_mode})
                 if st.attributes.get("temperature") != cmd.setpoint:
                     await self._call("climate", "set_temperature", {"entity_id": z.climate_id, "temperature": cmd.setpoint})
-            elif st.state != "off":
+            elif st.state != "off" and not z.constant:  # belt and braces: never close a constant zone
                 await self._call("climate", "set_hvac_mode", {"entity_id": z.climate_id, "hvac_mode": "off"})
         sel = self.cfg.get(CONF_MYZONE_SELECT)
         if sel and d.myzone:

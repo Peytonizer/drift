@@ -38,5 +38,8 @@
   outage, or while a command is being retried, is no longer taken as a manual change (which
   used to pause Drift for two hours). Persistent trouble raises a notification with the tier
   1 room's temperature, and the tier 1 room leaving its band triggers an immediate check.
+- Constant zones: zones listed as the AC's pressure-relief zones are never switched off
+  while Drift is running, so the AC's controller can always open them. Before this they
+  were closed with the other tier 3 zones when they didn't need air.
 - Shadow mode (plans without acting), a two-hour pause after any manual change, and handover
   that switches listed automations off while Drift is in control and back on when it isn't.

@@ -29,6 +29,7 @@ class ZoneInput:
     tier: int  # 1 = highest priority
     temp: float | None
     model: ZoneModel
+    constant: bool = False  # the AC's pressure-relief zone: never switched off by Drift
 
 
 @dataclass
@@ -260,7 +261,9 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
     for z in zones:
         target = _target(inp, z, mode, precool)
         lo, hi = inp.band_fn(z.tier, inp.now)
-        if z.tier == 1:
+        if z.tier == 1 or z.constant:
+            # Constant zones are how the AC relieves duct pressure; leaving them on (with a
+            # setpoint) lets its controller open them whenever it needs to.
             on = True
         elif z.zone_id in needing:
             on = True

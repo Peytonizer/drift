@@ -382,3 +382,15 @@ def test_bootstrap_recovers_room_behaviour_from_a_week_of_history():
     inp = mk(now, [ZoneInput("nursery", "Nursery", 1, 24.7, m)], f, 16, horizon_h=10)
     traj = project_passive(inp, inp.zones[0])
     assert traj[-1][1] < 23.0
+
+
+
+def test_constant_zones_are_never_switched_off():
+    now = datetime(2026, 1, 15, 22, 0, tzinfo=AEDT)
+    f = hot_forecast(now, {22: 32, 23: 31, 0: 30})
+    zs = zones(25.6, 24.8, others=22.0)  # tier 3 well inside its band: normally closed
+    zs[2] = ZoneInput("lounge", "Lounge", 3, 22.0, ZoneModel(), constant=True)
+    d = plan(mk(t := now, zs, f, 32))
+    assert d.action == "cool"
+    assert d.zone_commands["lounge"].on
+    assert not d.zone_commands["living"].on  # an ordinary tier 3 zone still closes

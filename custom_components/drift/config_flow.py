@@ -42,6 +42,7 @@ from .const import (
     CONF_TIER1_ZONE,
     CONF_TIER2_ZONES,
     CONF_TIER3_ZONES,
+    CONF_CONSTANT_ZONES,
     CONF_TOLERANCE,
     CONF_WEATHER,
     DEFAULTS,
@@ -85,6 +86,7 @@ def zones_schema(d: dict) -> vol.Schema:
             _opt(CONF_TIER1_SENSOR, d): _ent("sensor", device_class="temperature"),
             vol.Optional(CONF_TIER2_ZONES, default=d.get(CONF_TIER2_ZONES, [])): _ent("climate", multiple=True),
             vol.Optional(CONF_TIER3_ZONES, default=d.get(CONF_TIER3_ZONES, [])): _ent("climate", multiple=True),
+            vol.Optional(CONF_CONSTANT_ZONES, default=d.get(CONF_CONSTANT_ZONES, [])): _ent("climate", multiple=True),
         }
     )
 
