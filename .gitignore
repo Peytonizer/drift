@@ -1,0 +1,34 @@
+# Internal docs (project instructions, spec, backlog) and the house-specific setup (real
+# entity names, rooms, people) live in ~/git/workbench/drift/, never in this public repo.
+# CLAUDE.local.md imports them; the rest are ignored in case a copy lands here by mistake.
+CLAUDE.local.md
+CLAUDE.md
+SPEC.md
+IDEAS.md
+PRIVATE*
+HOUSE-SETUP*
+*.private.md
+
+# Home Assistant runtime state. Drift keeps its learned models, bands and nightly reviews
+# in Home Assistant's .storage, not in the repo. Ignored in case a local test config is
+# pointed at the working tree.
+.storage/
+config/
+*.db
+*.db-shm
+*.db-wal
+home-assistant.log*
+
+# Python virtual environment and test tooling (rebuilt, not tracked)
+.venv/
+.pytest_cache/
+
+# Python bytecode/cache
+__pycache__/
+*.pyc
+
+# macOS Finder metadata
+.DS_Store
+
+# Claude Code per-machine settings
+.claude/settings.local.json
