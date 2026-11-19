@@ -18,6 +18,8 @@ Status: unreleased. Installed and running in shadow mode.
 - **Solar pre-cool.** On hot afternoons with spare solar, it cools the house harder before evening.
 - **Tracks energy.** It learns the AC's power draw from the step change on a grid meter each time the AC starts or stops. It then splits the AC's energy into solar and grid.
 - **Reviews each night.** It records the time in band, compressor starts, runtime, energy, the solar/grid split, cost, forecast accuracy and the TOG in use. It also suggests tuning changes, but never applies them on its own.
+- **Learns each room from history.** On first start it trains each room's model on the last week of recorder history, so predictions are sound from the first night; it keeps learning from then on. A *Relearn room models from history* button redoes this, e.g. at a change of season.
+- **Copes with the AC dropping out.** Every 5 minutes it compares what it wants with what the AC is doing and resends if they differ, and every minute it checks that a command actually landed, resending up to three times. While the AC is unavailable it holds the last known state, and a state the AC reappears in isn't mistaken for someone changing it. If commands still aren't landing, or the AC has been unavailable for 10 minutes, it raises a Home Assistant notification (and the phone notification, if set) with the tier 1 room's temperature. When the tier 1 room leaves its band it checks straight away instead of waiting for the next cycle.
 - **Respects manual changes.** If someone changes the AC by hand, it pauses for 2 hours (adjustable).
 - **Has a shadow mode.** While switched off, it still plans and shows what it *would* do, without touching anything.
 
@@ -70,17 +72,18 @@ The defaults follow Love to Dream's Australian ratings. Brands differ, so edit t
 
 | Entity | What it is |
 |---|---|
-| `sensor.drift_status` | idle / cooling / heating / precooling / manual_override / disabled. Attributes: reason, MyZone, next start, per-zone temperature, band and command. |
+| `sensor.drift_status` | idle / cooling / heating / precooling / manual_override / ac_unreachable / disabled. Attributes: reason, MyZone, next start, whether the AC is reachable, any command still being retried, per-zone temperature, band and command. |
 | `sensor.drift_tier_1_sleepwear_recommendation` | Recommended TOG for tonight, with the room's natural overnight range. |
 | `sensor.drift_tier_1_predicted_in_1h` / `_3h` | Projection with the AC off. |
 | `sensor.drift_ac_power_estimated`, `…_ac_energy*` | Power and energy. The energy sensors work with the Energy dashboard. |
 | `sensor.drift_last_night_tier_1_in_band` | Last night's summary. |
 | `sensor.drift_tuning_suggestions` | Suggestions plus 7-night totals. |
-| `sensor.drift_thermal_model_samples` | What the model has learned for each room (diagnostic). |
+| `sensor.drift_thermal_model_samples` | What the model has learned for each room, and what the history training used (diagnostic). |
+| `button.drift_relearn_room_models_from_history` | Retrain every room's model from the last week of history. |
 
 ## Notes
 
-- The model learns online. Expect predictions to firm up after 2–3 days.
+- The model is trained from the last week of history on first start (the recorder keeps 10 days by default) and keeps learning online.
 - AC power is estimated from meter steps. A CT clamp on the AC circuit would be more precise.
 - Heating is allowed by default. Turn off *Allow heating* in Tuning to stop it heating on cool summer nights.
 

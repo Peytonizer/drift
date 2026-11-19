@@ -30,5 +30,13 @@
 - TOG bands are the chart ranges themselves, not trimmed by 0.5 °C. Trimming made the AC
   start earlier than the chart needs; the cool and heat depths already set where it aims.
   The default chart follows Love to Dream's Australian ratings and adds 1.5 TOG (18–22 °C).
+- Room models are trained from the last week of recorder history on first start, so the
+  first night's predictions don't rest on a single evening (which can mislead: a house still
+  giving off a hot day's heat looks like a room that never cools). A button retrains them.
+- Outage handling for the AC: commands are checked every minute and resent up to three
+  times; an unavailable AC holds its last known state; a mismatch during or just after an
+  outage, or while a command is being retried, is no longer taken as a manual change (which
+  used to pause Drift for two hours). Persistent trouble raises a notification with the tier
+  1 room's temperature, and the tier 1 room leaving its band triggers an immediate check.
 - Shadow mode (plans without acting), a two-hour pause after any manual change, and handover
   that switches listed automations off while Drift is in control and back on when it isn't.

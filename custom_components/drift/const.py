@@ -5,7 +5,7 @@ DOMAIN = "drift"
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.state"
 
-PLATFORMS = ["binary_sensor", "number", "select", "sensor", "switch", "time"]
+PLATFORMS = ["binary_sensor", "button", "number", "select", "sensor", "switch", "time"]
 
 # --- config keys (setup / zones / energy) ---
 CONF_NAME = "name"

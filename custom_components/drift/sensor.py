@@ -50,6 +50,13 @@ class StatusSensor(DriftEntity, SensorEntity):
             "myzone": d.myzone if d else None,
             "next_start": d.next_start.isoformat() if d and d.next_start else None,
             "override_until": c.override_until.isoformat() if c.override_until else None,
+            "ac_reachable": c.ac_unavailable_since is None and c.fault is None,
+            "ac_problem": c.fault,
+            "pending_command": (
+                {"mode": c.pending["mode"], "since": c.pending["first"].isoformat(), "attempts": c.pending["attempts"]}
+                if c.pending
+                else None
+            ),
             "in_window": c.in_window(dt_util.now()),
             "outdoor_now": c.outdoor,
             "zones": {
@@ -199,12 +206,15 @@ class ModelSensor(DriftEntity, SensorEntity):
     def extra_state_attributes(self):
         c = self.controller
         return {
+            "trained_from_history": c.bootstrap_info,
+            **{
             z.name: {
                 k: (round(v, 4) if isinstance(v, float) else v)
                 for k, v in c.models[z.climate_id].to_dict().items()
                 if k != "P"
             }
             for z in c.zones
+            },
         }
 
 

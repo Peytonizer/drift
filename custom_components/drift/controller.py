@@ -130,6 +130,15 @@ class DriftController:
         self.expected_mode: str | None = None
         self.last_cmd: datetime | None = None
         self.override_until: datetime | None = None
+        # MyAir can drop commands or go unavailable for a while. These track that so a
+        # glitch is retried and reported rather than mistaken for someone changing the AC.
+        self.ac_unavailable_since: datetime | None = None
+        self.ac_back_at: datetime | None = None
+        self.pending: dict | None = None  # {"mode", "first", "last", "attempts"}
+        self.fault: str | None = None
+        self._alerts: set[str] = set()
+        self._last_control: datetime | None = None
+        self.bootstrap_info: dict | None = None
         self.ac_watts_now = 0.0
         self.solar_w_now = 0.0
         self.grid_w_export: float | None = None
@@ -172,6 +181,7 @@ class DriftController:
         self._was_in_window = data.get("was_in_window", False)
         self.tog = data.get("tog", TOG_MANUAL)
         self._notified_date = data.get("notified_date")
+        self.bootstrap_info = data.get("bootstrap")
         if self.tog != TOG_MANUAL:
             self.bands["tier1_min"], self.bands["tier1_max"] = self.tog_band(self.tog)  # chart may have been edited
 
@@ -180,6 +190,8 @@ class DriftController:
         if self.ac_mode_actual != "off":
             self.ac_since = main.last_changed
         self.expected_mode = self.ac_mode_actual
+        if main is None or main.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            self.ac_unavailable_since = dt_util.now()
 
         self._unsubs.append(async_track_time_interval(self.hass, self._async_sample, timedelta(seconds=SAMPLE_INTERVAL_SEC)))
         self._unsubs.append(async_track_time_interval(self.hass, self._async_control, timedelta(minutes=CONTROL_INTERVAL_MIN)))
@@ -187,7 +199,115 @@ class DriftController:
             self._unsubs.append(
                 async_track_state_change_event(self.hass, [self.cfg[CONF_AC_PHASE_POWER]], self._on_phase_power)
             )
-        self.hass.async_create_task(self._async_control(dt_util.now()))
+        t1 = next((z for z in self.zones if z.tier == 1), None)
+        if t1:
+            watch = [t1.sensor_id] if t1.sensor_id else []
+            self._unsubs.append(
+                async_track_state_change_event(self.hass, watch + [t1.climate_id], self._on_tier1_change)
+            )
+        if not self.bootstrap_info:
+            self.hass.async_create_task(self.async_relearn())
+        else:
+            self.hass.async_create_task(self._async_control(dt_util.now()))
+
+    @callback
+    def _on_tier1_change(self, event: Event) -> None:
+        """Check straight away if the tier 1 room has left its band, rather than waiting for
+        the next 5-minute cycle. Rate-limited so a chatty sensor can't hammer the AC."""
+        t1 = next((z for z in self.zones if z.tier == 1), None)
+        temp = self.zone_temp(t1) if t1 else None
+        if temp is None:
+            return
+        now = dt_util.now()
+        lo, hi = self.band(1, now)
+        if lo <= temp <= hi:
+            return
+        if self._last_control and now - self._last_control < timedelta(minutes=2):
+            return
+        self.hass.async_create_task(self._async_control(now))
+
+    async def async_relearn(self) -> None:
+        """Rebuild every zone's model from the last week of recorder history."""
+        from functools import partial
+
+        from homeassistant.components.recorder import get_instance, history
+
+        from .bootstrap import fit_from_history
+
+        end = dt_util.now()
+        start = end - timedelta(days=7)
+        main_id = self.cfg[CONF_MAIN_CLIMATE]
+        ids = {main_id, self.cfg[CONF_WEATHER]}
+        for z in self.zones:
+            ids.add(z.climate_id)
+            if z.sensor_id:
+                ids.add(z.sensor_id)
+        try:
+            hist = await get_instance(self.hass).async_add_executor_job(
+                partial(
+                    history.get_significant_states,
+                    self.hass,
+                    start,
+                    end,
+                    sorted(ids),
+                    significant_changes_only=False,
+                    minimal_response=False,
+                    no_attributes=False,
+                )
+            )
+        except Exception as err:  # noqa: BLE001  (no recorder, or it failed: keep learning online)
+            _LOGGER.warning("Couldn't read history to train the room models: %s", err)
+            self.bootstrap_info = {"at": end.isoformat(), "error": str(err)}
+            await self._async_save()
+            await self._async_control(dt_util.now())
+            return
+
+        def rows(eid):
+            return [st for st in hist.get(eid, []) if hasattr(st, "state")]
+
+        modes = [
+            (st.last_updated, st.state if st.state in ACTIVE_MODES else "off")
+            for st in rows(main_id)
+            if st.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        ]
+        outdoor = []
+        for st in rows(self.cfg[CONF_WEATHER]):
+            t = st.attributes.get("temperature")
+            if t is not None:
+                outdoor.append((st.last_updated, float(t), st.attributes.get("cloud_coverage")))
+        info = {"at": end.isoformat(), "days": 7, "zones": {}}
+        for z in self.zones:
+            if z.sensor_id:
+                temps = [(st.last_updated, _f(st)) for st in rows(z.sensor_id)]
+            else:
+                temps = [(st.last_updated, st.attributes.get("current_temperature")) for st in rows(z.climate_id)]
+            temps = [(t, float(v)) for t, v in temps if v is not None]
+            zstate = [
+                (st.last_updated, (st.state not in ("off", STATE_UNAVAILABLE, STATE_UNKNOWN), st.attributes.get("temperature")))
+                for st in rows(z.climate_id)
+            ]
+            model = ZoneModel()
+            counts = await self.hass.async_add_executor_job(
+                fit_from_history,
+                model,
+                temps,
+                modes,
+                outdoor,
+                zstate,
+                self.hass.config.latitude,
+                self.hass.config.longitude,
+                start,
+                end,
+            )
+            # keep the fresh fit only if history actually had enough to say
+            if counts["passive"] >= 50:
+                self.models[z.climate_id] = model
+            info["zones"][z.name] = {**counts, "used": counts["passive"] >= 50}
+        self.bootstrap_info = info
+        self._tog_rec_at = None
+        await self._async_save()
+        _LOGGER.info("Room models trained from history: %s", info["zones"])
+        await self._async_control(dt_util.now())
 
     async def async_stop(self) -> None:
         for u in self._unsubs:
@@ -211,6 +331,7 @@ class DriftController:
                 "was_in_window": self._was_in_window,
                 "tog": self.tog,
                 "notified_date": self._notified_date,
+                "bootstrap": self.bootstrap_info,
             }
         )
 
@@ -409,7 +530,16 @@ class DriftController:
     # ------------------------------------------------------------------ 1-minute sampling
     def _track_main_mode(self, now: datetime) -> None:
         main = self.hass.states.get(self.cfg[CONF_MAIN_CLIMATE])
-        mode = main.state if main and main.state in ACTIVE_MODES else "off"
+        if main is None or main.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            # Hold the last known mode: an outage isn't a stop, and isn't a manual change.
+            if self.ac_unavailable_since is None:
+                self.ac_unavailable_since = now
+                _LOGGER.warning("Main AC unavailable; holding last known mode %s", self.ac_mode_actual)
+            return
+        if self.ac_unavailable_since is not None:
+            self.ac_unavailable_since = None
+            self.ac_back_at = now
+        mode = main.state if main.state in ACTIVE_MODES else "off"
         if mode != self.ac_mode_actual:
             if mode == "off":
                 self.last_stop = now
@@ -468,6 +598,7 @@ class DriftController:
         self._was_in_window = in_win
         self._pending_preds = [p for p in self._pending_preds if p[0] > now - timedelta(minutes=5)]
 
+        await self._check_ac_health(now)
         await self._maybe_notify(now)
         self._save_counter += 1
         if self._save_counter >= 10:
@@ -578,8 +709,18 @@ class DriftController:
                 if p60 is not None:
                     self._pending_preds.append((now + timedelta(minutes=60), p60))
 
-            # manual override detection
-            if self.enabled and self.expected_mode is not None and self.ac_mode_actual != self.expected_mode:
+            # Manual override detection. A mismatch only counts as someone changing the AC
+            # when the AC is reachable, Drift isn't still retrying a command, and it hasn't
+            # just come back from an outage (MyAir can reappear in a different state).
+            recently_back = self.ac_back_at is not None and now - self.ac_back_at < timedelta(minutes=10)
+            if (
+                self.enabled
+                and self.expected_mode is not None
+                and self.ac_mode_actual != self.expected_mode
+                and self.ac_unavailable_since is None
+                and self.pending is None
+                and not recently_back
+            ):
                 if self.last_cmd is None or now - self.last_cmd > timedelta(minutes=3):
                     self.override_until = now + timedelta(minutes=int(self.cfg[CONF_OVERRIDE_MINUTES]))
                     self.expected_mode = None
@@ -598,16 +739,81 @@ class DriftController:
                 await self._actuate(decision, now)
                 self.status = ("precooling" if decision.precool else f"{decision.action}ing") if decision.action != "off" else "idle"
                 self.reason = decision.reason
+                if self.fault:
+                    self.status = "ac_unreachable"
+                    self.reason = f"{self.fault}. Planner says: {decision.reason}"
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Drift control cycle failed")
             self.status = "error"
+        self._last_control = now
         self._notify()
 
-    async def _call(self, domain: str, service: str, data: dict) -> None:
+    async def _call(self, domain: str, service: str, data: dict) -> bool:
         try:
             await self.hass.services.async_call(domain, service, data, blocking=True)
+            return True
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Service %s.%s %s failed: %s", domain, service, data, err)
+            return False
+
+    async def _send_mode(self, mode: str, now: datetime) -> None:
+        """Send the main unit's mode and track it until the AC reports it."""
+        main = self.cfg[CONF_MAIN_CLIMATE]
+        await self._call("climate", "set_hvac_mode", {"entity_id": main, "hvac_mode": mode})
+        self.last_cmd = now
+        if self.pending and self.pending["mode"] == mode:
+            self.pending["last"] = now
+            self.pending["attempts"] += 1
+        else:
+            self.pending = {"mode": mode, "first": now, "last": now, "attempts": 1}
+
+    async def _check_ac_health(self, now: datetime) -> None:
+        """Every minute: confirm commands landed, retry quickly, and say so if the AC is unreachable."""
+        if not self.enabled:
+            self.pending = None
+            self.fault = None
+            return
+        if self.pending:
+            if self.ac_unavailable_since is None and self.ac_mode_actual == self.pending["mode"]:
+                self.pending = None
+            elif now - self.pending["last"] >= timedelta(seconds=90) and self.pending["attempts"] < 3:
+                _LOGGER.warning("AC hasn't reported %s yet; resending (attempt %s)", self.pending["mode"], self.pending["attempts"] + 1)
+                await self._send_mode(self.pending["mode"], now)
+        problem = None
+        if self.pending and self.pending["attempts"] >= 3 and now - self.pending["last"] >= timedelta(seconds=90):
+            problem = f"The AC hasn't responded to '{self.pending['mode']}' since {self.pending['first'].strftime('%H:%M')} (3 attempts); retrying every 5 minutes"
+        elif self.ac_unavailable_since and now - self.ac_unavailable_since >= timedelta(minutes=10):
+            problem = f"The AC (MyAir) has been unavailable since {self.ac_unavailable_since.strftime('%H:%M')}"
+        self.fault = problem
+        if problem:
+            t1 = next((z for z in self.zones if z.tier == 1), None)
+            temp = self.zone_temp(t1) if t1 else None
+            extra = ""
+            if t1 and temp is not None:
+                lo, hi = self.band(1, now)
+                extra = f" {t1.name} is {temp:.1f}°C (band {lo:g}–{hi:g})."
+            await self._alert("ac_unreachable", "Drift can't control the AC", f"{problem}.{extra}")
+        else:
+            await self._clear_alert("ac_unreachable")
+
+    async def _alert(self, key: str, title: str, message: str) -> None:
+        """Raise once per incident: a Home Assistant notification, plus the phone if set up."""
+        if key in self._alerts:
+            return
+        self._alerts.add(key)
+        await self._call(
+            "persistent_notification", "create", {"notification_id": f"drift_{key}", "title": title, "message": message}
+        )
+        svc = self.cfg.get(CONF_NOTIFY_SERVICE)
+        if svc:
+            domain, service = svc.split(".", 1) if "." in svc else ("notify", svc)
+            await self._call(domain, service, {"title": title, "message": message})
+
+    async def _clear_alert(self, key: str) -> None:
+        if key not in self._alerts:
+            return
+        self._alerts.discard(key)
+        await self._call("persistent_notification", "dismiss", {"notification_id": f"drift_{key}"})
 
     async def _apply_zones(self, d: Decision) -> None:
         for z in self.zones:
@@ -638,17 +844,15 @@ class DriftController:
     async def _actuate(self, d: Decision, now: datetime) -> None:
         main = self.cfg[CONF_MAIN_CLIMATE]
         if d.action == "off":
-            if self.ac_mode_actual != "off":
-                await self._call("climate", "set_hvac_mode", {"entity_id": main, "hvac_mode": "off"})
-                self.last_cmd = now
+            if self.ac_mode_actual != "off" or self.ac_unavailable_since is not None and self.expected_mode != "off":
+                await self._send_mode("off", now)
             self.expected_mode = "off"
             return
         await self._apply_zones(d)
         drv = d.zone_commands.get(d.driver_zone) if d.driver_zone else None
         mst = self.hass.states.get(main)
-        if self.ac_mode_actual != d.action:
-            await self._call("climate", "set_hvac_mode", {"entity_id": main, "hvac_mode": d.action})
-            self.last_cmd = now
+        if self.ac_mode_actual != d.action or self.ac_unavailable_since is not None:
+            await self._send_mode(d.action, now)
             self.running_precool = d.precool
         if drv and mst and mst.attributes.get("temperature") != drv.setpoint:
             await self._call("climate", "set_temperature", {"entity_id": main, "temperature": drv.setpoint})

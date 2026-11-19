@@ -226,3 +226,95 @@ async def test_tog_select_sets_band_and_notifies(hass: HomeAssistant, freezer):
     await c._async_sample(dt_util.now())
     assert len(notify) == 1  # once per day
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+
+async def _enabled_hot(hass, freezer):
+    freezer.move_to("2026-01-15 21:00:00+11:00")
+    await _setup_states(hass, nursery=26.4, outdoor=31, forecast_temps=[31, 30, 29, 28, 27, 26, 25, 24])
+    set_mode = async_mock_service(hass, "climate", "set_hvac_mode")
+    async_mock_service(hass, "climate", "set_temperature")
+    async_mock_service(hass, "automation", "turn_off")
+    pn_create = async_mock_service(hass, "persistent_notification", "create")
+    pn_dismiss = async_mock_service(hass, "persistent_notification", "dismiss")
+    entry = await _config_flow(hass)
+    async_mock_service(hass, "select", "select_option")
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.drift_control_enabled"}, blocking=True)
+    await hass.async_block_till_done()
+    return entry, set_mode, pn_create, pn_dismiss
+
+
+def _main_cmds(calls):
+    return [c.data["hvac_mode"] for c in calls if c.data["entity_id"] == "climate.ac"]
+
+
+async def test_dropped_command_is_retried_then_reported_not_treated_as_override(hass, freezer):
+    entry, set_mode, pn_create, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    assert _main_cmds(set_mode) == ["cool"]
+    # MyAir never applies it: climate.ac stays "off"
+    for _ in range(4):
+        freezer.tick(timedelta(seconds=95))
+        await c._async_sample(dt_util.now())
+    assert _main_cmds(set_mode) == ["cool", "cool", "cool"]
+    assert pn_create and "hasn't responded" in pn_create[0].data["message"]
+    assert "Nursery is 26.4" in pn_create[0].data["message"]
+    freezer.tick(timedelta(minutes=5))
+    await c._async_control(dt_util.now())
+    st = hass.states.get("sensor.drift_status")
+    assert st.state == "ac_unreachable", st.attributes["reason"]
+    assert c.override_until is None
+    assert _main_cmds(set_mode)[-1] == "cool"  # still trying every cycle
+    # it finally lands: the alert clears
+    hass.states.async_set("climate.ac", "cool", {"current_temperature": 26, "temperature": 23.5, "hvac_modes": ["off", "cool", "heat"]})
+    freezer.tick(timedelta(seconds=60))
+    await c._async_sample(dt_util.now())
+    await c._async_control(dt_util.now())
+    assert c.pending is None and c.fault is None
+    assert hass.states.get("sensor.drift_status").state == "cooling"
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_myair_outage_and_return_in_wrong_state_is_resent_not_an_override(hass, freezer):
+    entry, set_mode, pn_create, pn_dismiss = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    hass.states.async_set("climate.ac", "cool", {"current_temperature": 26, "temperature": 23.5, "hvac_modes": ["off", "cool", "heat"]})
+    freezer.tick(timedelta(seconds=60))
+    await c._async_sample(dt_util.now())
+    assert c.pending is None
+    # MyAir drops off for 12 minutes
+    hass.states.async_set("climate.ac", "unavailable", {})
+    for _ in range(12):
+        freezer.tick(timedelta(seconds=60))
+        await c._async_sample(dt_util.now())
+    assert c.ac_mode_actual == "cool"  # held, not recorded as a stop
+    assert pn_create and "unavailable since" in pn_create[0].data["message"]
+    # ...and comes back reporting "off"
+    hass.states.async_set("climate.ac", "off", {"current_temperature": 26.2, "temperature": 23.5, "hvac_modes": ["off", "cool", "heat"]})
+    freezer.tick(timedelta(seconds=60))
+    await c._async_sample(dt_util.now())
+    await c._async_control(dt_util.now())
+    assert c.override_until is None
+    assert _main_cmds(set_mode)[-1] == "cool"
+    assert pn_dismiss
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_tier1_leaving_band_triggers_an_immediate_check(hass, freezer):
+    freezer.move_to("2026-01-15 21:00:00+11:00")
+    await _setup_states(hass, nursery=24.0, outdoor=24, forecast_temps=[24, 23, 22, 21, 20, 19, 18, 18])
+    set_mode = async_mock_service(hass, "climate", "set_hvac_mode")
+    async_mock_service(hass, "climate", "set_temperature")
+    async_mock_service(hass, "automation", "turn_off")
+    async_mock_service(hass, "persistent_notification", "create")
+    entry = await _config_flow(hass)
+    async_mock_service(hass, "select", "select_option")
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.drift_control_enabled"}, blocking=True)
+    await hass.async_block_till_done()
+    assert not _main_cmds(set_mode)
+    freezer.tick(timedelta(minutes=3))
+    hass.states.async_set("sensor.nursery_temperature", "26.3", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    await hass.async_block_till_done()
+    assert _main_cmds(set_mode) == ["cool"]  # hard limit, acted on without waiting for the 5-minute cycle
+    await hass.config_entries.async_unload(entry.entry_id)
+

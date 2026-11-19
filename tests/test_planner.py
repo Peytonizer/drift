@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "drift"
 pkg = types.ModuleType("sc")
 pkg.__path__ = [str(ROOT)]
 sys.modules["sc"] = pkg
-for name in ("const", "model", "planner", "energy", "review", "tog"):
+for name in ("const", "model", "planner", "energy", "review", "tog", "bootstrap"):
     spec = importlib.util.spec_from_file_location(f"sc.{name}", ROOT / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"sc.{name}"] = mod
@@ -337,3 +337,48 @@ def test_recovery_never_applies_to_a_future_breach():
     d = plan(inp)
     assert not d.recoveries
     assert d.action == "cool", d.reason
+
+
+
+# ---- training the room model from a week of history
+from sc.bootstrap import fit_from_history  # noqa: E402
+
+
+def test_bootstrap_recovers_room_behaviour_from_a_week_of_history():
+    """A synthetic week: hot days, cool nights, the AC cooling some evenings.
+
+    The sensor reports in 0.1 °C steps like the real one. The fitted model should find
+    the room's coupling to outside and project the overnight fall the history shows.
+    """
+    import math
+    truth = ZoneModel(a=0.07, b=0.5, c=0.08, cool_rate=3.2)
+    start = datetime(2026, 11, 12, 0, 0, tzinfo=AEDT)
+    end = start + timedelta(days=7)
+    temps, modes, outdoor = [], [], []
+    t, room, mode = start, 23.0, "off"
+    while t < end:
+        h = t.hour + t.minute / 60
+        tout = 19 + 9 * math.sin((h - 9) / 24 * 2 * math.pi)  # ~10 at 3am, ~28 at 3pm
+        sol = solar_factor(t, LAT, LON, 30)
+        want = "cool" if (17 <= h < 21 and room > 25) else ("off" if room < 21.5 or not 17 <= h < 21 else mode)
+        if want != mode:
+            mode = want
+            modes.append((t, mode))
+        rate = truth.passive_rate(room, tout, sol) - (truth.cool_rate if mode == "cool" else 0)
+        room += rate / 60
+        temps.append((t, round(room, 1)))
+        if t.minute == 0:
+            outdoor.append((t, round(tout, 1), 30))
+        t += timedelta(minutes=1)
+    modes.insert(0, (start, "off"))
+    m = ZoneModel()
+    counts = fit_from_history(m, temps, modes, outdoor, None, LAT, LON, start, end)
+    assert counts["passive"] > 400 and counts["active"] >= 3
+    assert abs(m.a - truth.a) < 0.02, m.a
+    assert abs(m.cool_rate - truth.cool_rate) < 1.0, m.cool_rate
+    # overnight projection from 24.7 at 21:00 on a 15 °C-ish night falls, like the real house
+    now = datetime(2026, 11, 20, 21, 0, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=k), 16 - k * 0.6, 30) for k in range(12)]
+    inp = mk(now, [ZoneInput("nursery", "Nursery", 1, 24.7, m)], f, 16, horizon_h=10)
+    traj = project_passive(inp, inp.zones[0])
+    assert traj[-1][1] < 23.0
