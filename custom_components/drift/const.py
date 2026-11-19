@@ -39,9 +39,10 @@ CONF_IMPORT_TARIFF = "import_tariff"
 CONF_FEED_IN_TARIFF = "feed_in_tariff"
 CONF_ALLOW_HEATING = "allow_heating"
 CONF_ALLOW_COOLING = "allow_cooling"
-CONF_TOG_MARGIN = "tog_margin"
 CONF_NOTIFY_SERVICE = "notify_service"
 CONF_NOTIFY_TIME = "notify_time"
+CONF_RECOVERY_MAX = "recovery_max_c"
+CONF_RECOVERY_MINUTES = "recovery_minutes"
 
 DEFAULTS = {
     CONF_GRID_IMPORT_NEGATIVE: True,
@@ -62,8 +63,9 @@ DEFAULTS = {
     CONF_FEED_IN_TARIFF: 0.0,
     CONF_ALLOW_HEATING: True,
     CONF_ALLOW_COOLING: True,
-    CONF_TOG_MARGIN: 0.5,
     CONF_NOTIFY_TIME: "17:00:00",
+    CONF_RECOVERY_MAX: 0.7,
+    CONF_RECOVERY_MINUTES: 45,
 }
 
 # --- live-adjustable bands (number entities) ---

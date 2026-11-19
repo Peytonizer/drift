@@ -1,23 +1,27 @@
 """Sleepwear TOG chart: TOG -> comfort band, and a bedtime recommendation (pure Python).
 
-Default chart follows the common Australian sleepwear guidance
-(e.g. Love to Dream / ergoPouch):
-    0.2 TOG  24-27 °C    1.0 TOG  20-24 °C    2.5 TOG  16-20 °C    3.5 TOG  below 16 °C
+Default chart follows Love to Dream's Australian ratings:
+    0.2 TOG  24-27 °C    1.0 TOG  20-24 °C    1.5 TOG  18-22 °C
+    2.5 TOG  16-20 °C    3.5 TOG  below 16 °C (13-16 here, so it has a floor)
 Every value is editable in the integration options.
+
+The chart range is used as the band as-is. Where the AC aims when it does run comes from
+the cool/heat depth (target = edge -/+ depth), so trimming the band as well would only make
+it start earlier than the chart needs.
 """
 from __future__ import annotations
 
 from statistics import median
 
 TOG_MANUAL = "Manual"
-TOG_LEVELS = ["0.2", "1.0", "2.5", "3.5"]
+TOG_LEVELS = ["0.2", "1.0", "1.5", "2.5", "3.5"]
 DEFAULT_CHART: dict[str, tuple[float, float]] = {
     "0.2": (24.0, 27.0),
     "1.0": (20.0, 24.0),
+    "1.5": (18.0, 22.0),
     "2.5": (16.0, 20.0),
     "3.5": (13.0, 16.0),
 }
-DEFAULT_MARGIN = 0.5
 
 
 def chart_from_options(opts: dict) -> dict[str, tuple[float, float]]:
@@ -28,12 +32,9 @@ def chart_from_options(opts: dict) -> dict[str, tuple[float, float]]:
     return chart
 
 
-def band_for(tog: str, chart: dict[str, tuple[float, float]], margin: float = DEFAULT_MARGIN) -> tuple[float, float]:
-    """Pull the chart range in by `margin` each side so control stays inside it."""
+def band_for(tog: str, chart: dict[str, tuple[float, float]]) -> tuple[float, float]:
     lo, hi = chart[tog]
-    if hi - lo < 2 * margin + 1:
-        margin = max(0.0, (hi - lo - 1) / 2)
-    return round(lo + margin, 1), round(hi - margin, 1)
+    return round(lo, 1), round(hi, 1)
 
 
 def recommend(temps: list[float], chart: dict[str, tuple[float, float]]) -> dict | None:
@@ -53,7 +54,13 @@ def recommend(temps: list[float], chart: dict[str, tuple[float, float]]) -> dict
         lo, hi = chart[tog]
         return 0.0 if lo <= med <= hi else min(abs(med - lo), abs(med - hi))
 
-    best = sorted(chart, key=lambda tg: (-round(coverage[tg], 2), dist(tg)))[0]
+    def centre_gap(tog: str) -> float:
+        lo, hi = chart[tog]
+        return abs(med - (lo + hi) / 2)
+
+    # Overlapping ranges (1.0 and 1.5 share 20-22) can tie on coverage; prefer the one
+    # whose middle is closest to where the room will actually sit.
+    best = sorted(chart, key=lambda tg: (-round(coverage[tg], 2), dist(tg), centre_gap(tg)))[0]
     return {
         "tog": best,
         "natural_min": round(min(temps), 1),

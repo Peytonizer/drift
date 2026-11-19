@@ -88,14 +88,15 @@
           "precool_min_outdoor_c": "Solar pre-cool only if forecast max ≥",
           "precool_min_surplus_w": "Solar pre-cool minimum export",
           "import_tariff": "Grid import tariff",
-          "feed_in_tariff": "Solar feed-in tariff"
+          "feed_in_tariff": "Solar feed-in tariff",
+          "recovery_max_c": "Let a room already over its band recover on its own if it is over by no more than",
+          "recovery_minutes": "…and the forecast has it back in band within"
         }
       },
       "tog": {
         "title": "Sleepwear (TOG) chart",
-        "description": "Picking a TOG on the device page sets the tier 1 overnight band from this chart. Defaults follow common Australian sleepwear guidance; change them to match your brand.",
+        "description": "Picking a TOG on the device page sets the tier 1 overnight band to this chart's range. Defaults follow Love to Dream's Australian ratings; change them to match your sleepwear.",
         "data": {
-          "tog_margin": "Keep this far inside the chart range",
           "notify_service": "Notify service for the bedtime suggestion (e.g. notify.mobile_app_my_phone)",
           "notify_time": "Send the bedtime suggestion at",
           "tog_0_2_min": "0.2 TOG from",
@@ -105,7 +106,9 @@
           "tog_2_5_min": "2.5 TOG from",
           "tog_2_5_max": "2.5 TOG to",
           "tog_3_5_min": "3.5 TOG from",
-          "tog_3_5_max": "3.5 TOG to"
+          "tog_3_5_max": "3.5 TOG to",
+          "tog_1_5_min": "1.5 TOG from",
+          "tog_1_5_max": "1.5 TOG to"
         }
       }
     },

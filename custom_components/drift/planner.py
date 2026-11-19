@@ -50,6 +50,8 @@ class Settings:
     start_lag_min: int = 10
     tolerance_c: float = 0.3
     tolerance_minutes: int = 20
+    recovery_max_c: float = 0.7
+    recovery_minutes: int = 45
     hard_margin_c: float = 1.0
     min_open_zones: int = 3
     precool_enabled: bool = True
@@ -97,6 +99,16 @@ class Need:
 
 
 @dataclass
+class Recovery:
+    """A zone already outside its band that the forecast brings back on its own."""
+
+    zone_id: str
+    mode: str  # the mode it would otherwise need
+    excess_now: float
+    back_in_band: datetime
+
+
+@dataclass
 class Decision:
     action: str  # off | cool | heat
     reason: str
@@ -106,6 +118,7 @@ class Decision:
     zone_commands: dict[str, ZoneCommand] = field(default_factory=dict)
     predictions: dict[str, list[tuple[datetime, float]]] = field(default_factory=dict)
     needs: list[Need] = field(default_factory=list)
+    recoveries: list[Recovery] = field(default_factory=list)
     next_start: datetime | None = None
 
 
@@ -148,8 +161,44 @@ def project_passive(inp: PlanInput, zone: ZoneInput, start_temp: float | None = 
     return out
 
 
-def find_need(inp: PlanInput, zone: ZoneInput, traj: list[tuple[datetime, float]]) -> list[Need]:
-    """Latest-start analysis for cooling and heating."""
+def _episodes(inp: PlanInput, zone: ZoneInput, traj: list[tuple[datetime, float]], mode: str) -> list[dict]:
+    """Split the projection into contiguous stretches outside the band.
+
+    Each episode records its points (time, excess), when it starts, and when the room is
+    back in band (None if it is still out at the end of the horizon).
+    """
+    episodes: list[dict] = []
+    cur: dict | None = None
+    for when, temp in traj:
+        lo, hi = inp.band_fn(zone.tier, when)
+        excess = (temp - hi) if mode == "cool" else (lo - temp)
+        if excess > 0:
+            if cur is None:
+                cur = {"start": when, "points": [], "end": None}
+                episodes.append(cur)
+            cur["points"].append((when, excess))
+        elif cur is not None:
+            cur["end"] = when
+            cur = None
+    return episodes
+
+
+def find_need(
+    inp: PlanInput,
+    zone: ZoneInput,
+    traj: list[tuple[datetime, float]],
+    recoveries: list[Recovery] | None = None,
+) -> list[Need]:
+    """Latest-start analysis for cooling and heating, one need per out-of-band episode.
+
+    Two kinds of excursion are left alone:
+    * small, short ones anywhere in the horizon (tolerance), and
+    * a room that is already over (or under) its band by a little, when the forecast has
+      it back in band soon on its own (natural recovery). Recovery only applies to the
+      episode the room is in now: a future breach is still planned against, so the room
+      is in band when it should be (e.g. at bedtime).
+    The hard limit in plan() overrides both.
+    """
     s = inp.settings
     needs: list[Need] = []
     lag = timedelta(minutes=s.start_lag_min)
@@ -159,30 +208,24 @@ def find_need(inp: PlanInput, zone: ZoneInput, traj: list[tuple[datetime, float]
         if mode == "heat" and not s.allow_heating:
             continue
         rate = zone.model.cool_rate if mode == "cool" else zone.model.heat_rate
-        latest: datetime | None = None
-        first_violation: datetime | None = None
-        peak = 0.0
-        deg_min = 0.0
-        minutes_over = 0
-        for when, temp in traj:
-            lo, hi = inp.band_fn(zone.tier, when)
-            excess = (temp - hi) if mode == "cool" else (lo - temp)
-            if excess <= 0:
+        for ep in _episodes(inp, zone, traj, mode):
+            pts = ep["points"]
+            peak = max(e for _, e in pts)
+            minutes_over = len(pts) * s.step_min
+            deg_min = sum(e for _, e in pts) * s.step_min
+            if peak <= s.tolerance_c and (minutes_over <= s.tolerance_minutes or deg_min <= s.tolerance_c * 30):
                 continue
-            peak = max(peak, excess)
-            deg_min += excess * s.step_min
-            minutes_over += s.step_min
-            if first_violation is None:
-                first_violation = when
-            start_by = when - timedelta(hours=excess / max(rate, 0.1)) - lag
-            if latest is None or start_by < latest:
-                latest = start_by
-        if latest is None:
-            continue
-        # tolerate small, short excursions rather than firing up the whole system
-        if peak <= s.tolerance_c and (minutes_over <= s.tolerance_minutes or deg_min <= s.tolerance_c * 30):
-            continue
-        needs.append(Need(zone.zone_id, zone.tier, mode, latest, first_violation, peak, deg_min))
+            if (
+                ep["start"] <= inp.now
+                and ep["end"] is not None
+                and peak <= s.recovery_max_c
+                and ep["end"] - inp.now <= timedelta(minutes=s.recovery_minutes)
+            ):
+                if recoveries is not None:
+                    recoveries.append(Recovery(zone.zone_id, mode, pts[0][1], ep["end"]))
+                continue
+            latest = min(when - timedelta(hours=e / max(rate, 0.1)) - lag for when, e in pts)
+            needs.append(Need(zone.zone_id, zone.tier, mode, latest, ep["start"], peak, deg_min))
     return needs
 
 
@@ -267,12 +310,13 @@ def plan(inp: PlanInput) -> Decision:
     step = timedelta(minutes=s.step_min)
     preds: dict[str, list[tuple[datetime, float]]] = {}
     needs: list[Need] = []
+    recoveries: list[Recovery] = []
     zones_by_id = {z.zone_id: z for z in inp.zones}
     for z in inp.zones:
         traj = project_passive(inp, z)
         preds[z.zone_id] = traj
         if traj:
-            needs.extend(find_need(inp, z, traj))
+            needs.extend(find_need(inp, z, traj, recoveries))
 
     due = [n for n in needs if n.latest_start <= now + step]
     hard = [
@@ -283,7 +327,7 @@ def plan(inp: PlanInput) -> Decision:
     ]
 
     def build(action: str, reason: str, precool: bool = False) -> Decision:
-        d = Decision(action=action, reason=reason, precool=precool, predictions=preds, needs=needs)
+        d = Decision(action=action, reason=reason, precool=precool, predictions=preds, needs=needs, recoveries=recoveries)
         if action in ("cool", "heat"):
             needing = {n.zone_id for n in needs if n.mode == action}
             d.zone_commands, d.myzone = _zone_commands(inp, action, precool, needing)
@@ -372,12 +416,22 @@ def plan(inp: PlanInput) -> Decision:
                 precool=True,
             )
 
+    recovering = ""
+    if recoveries:
+        r = sorted(recoveries, key=lambda x: zones_by_id[x.zone_id].tier)[0]
+        side = "over" if r.mode == "cool" else "under"
+        recovering = (
+            f"{zones_by_id[r.zone_id].name} is {r.excess_now:.1f}°C {side} its band but forecast back in band "
+            f"by {_fmt(r.back_in_band)} on its own — letting it recover"
+        )
     if needs:
         n = sorted(needs, key=lambda x: x.latest_start)[0]
         zname = zones_by_id[n.zone_id].name
-        return build(
-            "off",
+        msg = (
             f"Holding off: {zname} projected out of band at {_fmt(n.violation_at)}; "
-            f"will start {n.mode} around {_fmt(max(n.latest_start, now))}",
+            f"will start {n.mode} around {_fmt(max(n.latest_start, now))}"
         )
+        return build("off", f"{recovering}. {msg}" if recovering else msg)
+    if recovering:
+        return build("off", recovering)
     return build("off", "All zones forecast to stay in band — letting the house drift naturally")

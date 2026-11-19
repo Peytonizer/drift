@@ -38,12 +38,13 @@ from .const import (
     CONF_PRECOOL_MIN_OUTDOOR,
     CONF_PRECOOL_MIN_SURPLUS,
     CONF_PRECOOL_START_HOUR,
+    CONF_RECOVERY_MAX,
+    CONF_RECOVERY_MINUTES,
     CONF_START_LAG,
     CONF_TIER1_SENSOR,
     CONF_TIER1_ZONE,
     CONF_TIER2_ZONES,
     CONF_TIER3_ZONES,
-    CONF_TOG_MARGIN,
     CONF_TOLERANCE,
     CONF_WEATHER,
     CONTROL_INTERVAL_MIN,
@@ -252,7 +253,7 @@ class DriftController:
         await self._async_control(dt_util.now())
 
     def tog_band(self, tog: str) -> tuple[float, float]:
-        return band_for(tog, chart_from_options(self.cfg), float(self.cfg.get(CONF_TOG_MARGIN, 0.5)))
+        return band_for(tog, chart_from_options(self.cfg))
 
     async def async_set_tog(self, tog: str) -> None:
         self.tog = tog
@@ -527,6 +528,8 @@ class DriftController:
             min_off_min=int(c[CONF_MIN_OFF]),
             start_lag_min=int(c[CONF_START_LAG]),
             tolerance_c=float(c[CONF_TOLERANCE]),
+            recovery_max_c=float(c[CONF_RECOVERY_MAX]),
+            recovery_minutes=int(c[CONF_RECOVERY_MINUTES]),
             min_open_zones=int(c[CONF_MIN_OPEN_ZONES]),
             precool_enabled=self.precool_enabled,
             precool_start_hour=int(c[CONF_PRECOOL_START_HOUR]),

@@ -173,7 +173,7 @@ async def test_options_flow_tuning(hass: HomeAssistant, freezer):
     assert r["step_id"] == "tuning"
     data = {k: v for k, v in {
         "min_run_minutes": 40, "min_off_minutes": 20, "start_lag_minutes": 15, "cool_depth": 2.0, "heat_depth": 1.5,
-        "tolerance_c": 0.3, "horizon_hours": 6, "min_open_zones": 3, "override_minutes": 120, "allow_cooling": True,
+        "tolerance_c": 0.3, "recovery_max_c": 0.7, "recovery_minutes": 45, "horizon_hours": 6, "min_open_zones": 3, "override_minutes": 120, "allow_cooling": True,
         "allow_heating": True, "precool_depth": 3.0, "precool_start_hour": 13, "precool_min_outdoor_c": 28,
         "precool_min_surplus_w": 2500, "import_tariff": 0.3, "feed_in_tariff": 0.05}.items()}
     r = await hass.config_entries.options.async_configure(r["flow_id"], data)
@@ -193,14 +193,14 @@ async def test_tog_select_sets_band_and_notifies(hass: HomeAssistant, freezer):
 
     await hass.services.async_call("select", "select_option", {"entity_id": "select.drift_tier_1_sleepwear_tog", "option": "1.0"}, blocking=True)
     await hass.async_block_till_done()
-    assert hass.states.get("number.drift_tier_1_overnight_min").state == "20.5"
-    assert hass.states.get("number.drift_tier_1_overnight_max").state == "23.5"
+    assert hass.states.get("number.drift_tier_1_overnight_min").state == "20.0"
+    assert hass.states.get("number.drift_tier_1_overnight_max").state == "24.0"
 
     rec = hass.states.get("sensor.drift_tier_1_sleepwear_recommendation")
-    assert rec.state in ("0.2", "1.0", "2.5", "3.5"), rec.attributes
+    assert rec.state in ("0.2", "1.0", "1.5", "2.5", "3.5"), rec.attributes
 
     # hand-editing the tier 1 band drops back to Manual
-    await hass.services.async_call("number", "set_value", {"entity_id": "number.drift_tier_1_overnight_max", "value": 24.0}, blocking=True)
+    await hass.services.async_call("number", "set_value", {"entity_id": "number.drift_tier_1_overnight_max", "value": 23.5}, blocking=True)
     await hass.async_block_till_done()
     assert hass.states.get("select.drift_tier_1_sleepwear_tog").state == "Manual"
 
@@ -208,8 +208,8 @@ async def test_tog_select_sets_band_and_notifies(hass: HomeAssistant, freezer):
     r = await hass.config_entries.options.async_init(entry.entry_id)
     r = await hass.config_entries.options.async_configure(r["flow_id"], {"next_step_id": "tog"})
     assert r["step_id"] == "tog"
-    form = {"tog_margin": 0.5, "notify_service": "notify.mobile_app_test_phone", "notify_time": "17:00:00"}
-    for k, (lo, hi) in {"0_2": (24, 27), "1_0": (20, 24), "2_5": (16, 20), "3_5": (13, 16)}.items():
+    form = {"notify_service": "notify.mobile_app_test_phone", "notify_time": "17:00:00"}
+    for k, (lo, hi) in {"0_2": (24, 27), "1_0": (20, 24), "1_5": (18, 22), "2_5": (16, 20), "3_5": (13, 16)}.items():
         form[f"tog_{k}_min"], form[f"tog_{k}_max"] = lo, hi
     r = await hass.config_entries.options.async_configure(r["flow_id"], form)
     assert r["type"] == "create_entry"

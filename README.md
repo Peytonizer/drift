@@ -2,12 +2,12 @@
 
 Forecast-aware, tiered climate control for zoned ducted AC in Home Assistant, built and tested against Advantage Air / MyAir. All logic runs locally in Home Assistant; only the weather forecast comes from the internet.
 
-Status: unreleased. Built and tested; not yet installed on the live system.
+Status: unreleased. Installed and running in shadow mode.
 
 ## What it does
 
 - **Looks ahead.** Every 5 minutes it projects each room's temperature for the next 6 hours with the AC off, using a learned thermal model per room and your hourly forecast.
-- **Lets rooms cool or warm naturally when they can.** It only starts the AC at the latest moment that still keeps the room in band.
+- **Lets rooms cool or warm naturally when they can.** It only starts the AC at the latest moment that still keeps the room in band. A room that is already a little outside its band (up to 0.7 °C) is left alone if the forecast has it back inside within 45 minutes on its own. Beyond 1 °C it always acts.
 - **Is ready on time.** It pre-cools or pre-heats before the overnight window starts, so the priority room is already in band at bedtime.
 - **Prevents short-cycling.** It runs in proper blocks, with a minimum run time, a minimum off time, and a target set below the band edge.
 - **Uses tiers to decide which rooms get air:**
@@ -50,20 +50,21 @@ It starts **disabled (shadow mode)**. Watch `sensor.drift_status` → `reason`, 
 | Bands: tier 1/2/3 overnight, daytime guard | Number entities on the device page (editing tier 1 by hand switches TOG to *Manual*) |
 | Overnight window | Time entities (default 17:30 → 07:00) |
 | Control on/off, solar pre-cool | Switches |
-| Run/off times, depths, tolerance, tariffs, heating/cooling allowed | Configure → Tuning |
-| TOG chart, margin, bedtime notification | Configure → Sleepwear (TOG) |
+| Run/off times, depths, tolerance, natural recovery, tariffs, heating/cooling allowed | Configure → Tuning |
+| TOG chart, bedtime notification | Configure → Sleepwear (TOG) |
 | Zone tiers, sensors, meter | Configure → Zones / Energy |
 
 ### Default TOG chart (editable)
 
-| TOG | Chart range | Band used (0.5 °C margin) |
+| TOG | Band | Aims for when running (default depths) |
 |---|---|---|
-| 0.2 | 24–27 °C | 24.5–26.5 |
-| 1.0 | 20–24 °C | 20.5–23.5 |
-| 2.5 | 16–20 °C | 16.5–19.5 |
-| 3.5 | < 16 °C (13–16) | 13.5–15.5 |
+| 0.2 | 24–27 °C | cool to 25.5, heat to 25.5 |
+| 1.0 | 20–24 °C | cool to 22.5, heat to 21.5 |
+| 1.5 | 18–22 °C | cool to 20.5, heat to 19.5 |
+| 2.5 | 16–20 °C | cool to 18.5, heat to 17.5 |
+| 3.5 | below 16 °C (13–16 here) | cool to 14.5, heat to 14.5 |
 
-The defaults follow common Australian sleepwear guidance (Love to Dream, ergoPouch). Check your brand's chart.
+The defaults follow Love to Dream's Australian ratings. Brands differ, so edit the chart to match your sleepwear. The chart range is the band itself; the cool and heat depths (Tuning) decide where the AC aims inside it, so the room has the full range to drift in.
 
 ## Entities
 

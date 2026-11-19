@@ -267,16 +267,73 @@ def test_review_and_suggestions():
 from sc.tog import DEFAULT_CHART, band_for, chart_from_options, recommend  # noqa: E402
 
 
-def test_tog_bands():
-    assert band_for("1.0", DEFAULT_CHART) == (20.5, 23.5)
-    assert band_for("0.2", DEFAULT_CHART) == (24.5, 26.5)
-    assert band_for("2.5", DEFAULT_CHART, 0.0) == (16.0, 20.0)
+def test_tog_bands_use_the_chart_range_as_is():
+    assert band_for("1.0", DEFAULT_CHART) == (20.0, 24.0)
+    assert band_for("1.5", DEFAULT_CHART) == (18.0, 22.0)
+    assert band_for("0.2", DEFAULT_CHART) == (24.0, 27.0)
     chart = chart_from_options({"tog_1_0_min": 21, "tog_1_0_max": 23})
-    assert band_for("1.0", chart) == (21.5, 22.5)
+    assert band_for("1.0", chart) == (21.0, 23.0)
 
 
 def test_tog_recommendation_follows_natural_overnight_temps():
     assert recommend([23.8, 23.0, 22.4, 21.9, 21.5, 21.2], DEFAULT_CHART)["tog"] == "1.0"
     assert recommend([26.5, 26.0, 25.6, 25.2, 24.9], DEFAULT_CHART)["tog"] == "0.2"
     assert recommend([19.5, 18.4, 17.6, 17.0], DEFAULT_CHART)["tog"] == "2.5"
+    # 1.0 (20-24) and 1.5 (18-22) overlap: a room sitting 20-22 all night suits 1.5
+    assert recommend([21.8, 21.2, 20.6, 20.2], DEFAULT_CHART)["tog"] == "1.5"
     assert recommend([], DEFAULT_CHART) is None
+
+
+
+# ---- natural recovery: already over the limit, forecast says it comes back on its own
+TOG10 = {1: (20, 24), 2: (19, 25), 3: (17, 27)}
+
+
+def band_tog10(tier, when):
+    mins = when.hour * 60 + when.minute
+    return TOG10[tier] if (mins >= 17 * 60 + 30 or mins < 7 * 60) else DAY
+
+
+def test_recovers_naturally_when_slightly_over_and_cooling_outside():
+    now = datetime(2026, 11, 20, 20, 30, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=h), 14 - h * 0.5, 50) for h in range(8)]
+    zs = [ZoneInput("nursery", "Nursery", 1, 24.5, ZoneModel(a=0.12))]
+    inp = mk(now, zs, f, 15, min_open_zones=1)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    assert d.action == "off", d.reason
+    assert "letting it recover" in d.reason and "0.5°C over" in d.reason
+    assert d.recoveries and d.recoveries[0].back_in_band - now <= timedelta(minutes=45)
+
+
+def test_cools_when_slightly_over_but_warm_outside():
+    now = datetime(2026, 1, 15, 20, 30, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=h), 31 - h * 0.3, 10) for h in range(8)]
+    zs = [ZoneInput("nursery", "Nursery", 1, 24.5, ZoneModel())]
+    inp = mk(now, zs, f, 31, min_open_zones=1)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    assert d.action == "cool", d.reason
+    assert d.zone_commands["nursery"].setpoint == 22.5  # chart edge 24 - cool depth 1.5
+
+
+def test_too_far_over_to_wait_even_if_it_would_recover():
+    now = datetime(2026, 11, 20, 20, 30, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=h), 10, 50) for h in range(8)]
+    zs = [ZoneInput("nursery", "Nursery", 1, 24.9, ZoneModel(a=0.3))]
+    inp = mk(now, zs, f, 10, min_open_zones=1)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    assert d.action == "cool", d.reason  # 0.9 over is beyond the 0.7 recovery allowance
+
+
+def test_recovery_never_applies_to_a_future_breach():
+    """A breach that hasn't happened yet is still planned against (e.g. bedtime)."""
+    day = datetime(2026, 1, 15, 0, 0, tzinfo=AEDT)
+    f = hot_forecast(day, {16: 30, 17: 29, 18: 26, 19: 22, 20: 19, 21: 17})
+    zs = [ZoneInput("nursery", "Nursery", 1, 24.6, ZoneModel(a=0.12))]
+    inp = mk(day.replace(hour=17, minute=10), zs, f, 29.5, cloud=10, min_open_zones=1)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    assert not d.recoveries
+    assert d.action == "cool", d.reason

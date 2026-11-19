@@ -22,5 +22,13 @@
 - Sleepwear TOG mode: choosing a TOG sets the tier 1 band from an editable chart, a sensor
   recommends tonight's TOG from the room's natural overnight temperatures, and an optional
   notification sends it at 17:00.
+- Natural recovery: a room already outside its band by up to 0.7 °C is left to come back on
+  its own when the forecast has it back within 45 minutes (both adjustable). Before this,
+  any room over its band by more than 0.3 °C started the AC at once, even on a cooling
+  evening. It applies only to the excursion the room is in now; future breaches are still
+  planned against, so the room is ready for bedtime.
+- TOG bands are the chart ranges themselves, not trimmed by 0.5 °C. Trimming made the AC
+  start earlier than the chart needs; the cool and heat depths already set where it aims.
+  The default chart follows Love to Dream's Australian ratings and adds 1.5 TOG (18–22 °C).
 - Shadow mode (plans without acting), a two-hour pause after any manual change, and handover
   that switches listed automations off while Drift is in control and back on when it isn't.

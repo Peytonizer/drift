@@ -35,12 +35,13 @@ from .const import (
     CONF_PRECOOL_MIN_OUTDOOR,
     CONF_PRECOOL_MIN_SURPLUS,
     CONF_PRECOOL_START_HOUR,
+    CONF_RECOVERY_MAX,
+    CONF_RECOVERY_MINUTES,
     CONF_START_LAG,
     CONF_TIER1_SENSOR,
     CONF_TIER1_ZONE,
     CONF_TIER2_ZONES,
     CONF_TIER3_ZONES,
-    CONF_TOG_MARGIN,
     CONF_TOLERANCE,
     CONF_WEATHER,
     DEFAULTS,
@@ -111,6 +112,8 @@ def tuning_schema(d: dict) -> vol.Schema:
             vol.Required(CONF_COOL_DEPTH, default=g(CONF_COOL_DEPTH)): _num(0.5, 4, 0.5, "°C"),
             vol.Required(CONF_HEAT_DEPTH, default=g(CONF_HEAT_DEPTH)): _num(0.5, 4, 0.5, "°C"),
             vol.Required(CONF_TOLERANCE, default=g(CONF_TOLERANCE)): _num(0, 1, 0.1, "°C"),
+            vol.Required(CONF_RECOVERY_MAX, default=g(CONF_RECOVERY_MAX)): _num(0, 1.5, 0.1, "°C"),
+            vol.Required(CONF_RECOVERY_MINUTES, default=g(CONF_RECOVERY_MINUTES)): _num(0, 180, 5, "min"),
             vol.Required(CONF_HORIZON, default=g(CONF_HORIZON)): _num(2, 24, 1, "h"),
             vol.Required(CONF_MIN_OPEN_ZONES, default=g(CONF_MIN_OPEN_ZONES)): _num(1, 10, 1),
             vol.Required(CONF_OVERRIDE_MINUTES, default=g(CONF_OVERRIDE_MINUTES)): _num(15, 720, 15, "min"),
@@ -128,7 +131,6 @@ def tuning_schema(d: dict) -> vol.Schema:
 
 def tog_schema(d: dict) -> vol.Schema:
     fields: dict = {
-        vol.Required(CONF_TOG_MARGIN, default=d.get(CONF_TOG_MARGIN, DEFAULTS[CONF_TOG_MARGIN])): _num(0, 1.5, 0.1, "°C"),
         _opt(CONF_NOTIFY_SERVICE, d): sel.TextSelector(),
         vol.Required(CONF_NOTIFY_TIME, default=d.get(CONF_NOTIFY_TIME, DEFAULTS[CONF_NOTIFY_TIME])): sel.TimeSelector(),
     }
