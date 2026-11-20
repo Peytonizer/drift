@@ -45,7 +45,10 @@ def _band(hass, zone):
     return list(hass.states.get("sensor.drift_status").attributes["zones"][zone]["band"])
 
 
-async def test_rules_via_subentries_with_a_real_schedule(hass: HomeAssistant, freezer):
+# The test's own `schedule` helper keeps a next-event timer running after teardown; that is Home
+# Assistant's entity, not something Drift started.
+@pytest.mark.parametrize("expected_lingering_timers", [True])
+async def test_rules_via_subentries_with_a_real_schedule(hass: HomeAssistant, freezer, expected_lingering_timers):
     freezer.move_to("2026-11-23 09:00:00+11:00")  # Monday
     await _setup_states(hass, nursery=23.0, outdoor=22)
     await _schedules(hass)
