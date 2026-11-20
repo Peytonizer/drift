@@ -672,3 +672,48 @@ async def test_cold_night_cool_run_uses_the_shallow_setpoint_and_stops_there(has
     st = hass.states.get("sensor.drift_status")
     assert "reached target" in st.attributes["reason"], st.attributes["reason"]
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_own_run_is_restored_when_the_ac_loads_after_a_restart(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    await _land(hass, freezer, c)
+    started = c.ac_since
+    starts = c.totals.starts
+    freezer.tick(timedelta(minutes=4))
+
+    # Home Assistant restarts and the AC entity isn't there yet when Drift starts
+    c = await _restart(hass, entry, ac_state=("unavailable", {}))
+    assert c._awaiting_first_state
+    freezer.tick(timedelta(minutes=1))
+    hass.states.async_set("climate.ac", "cool", AC_COOL)  # it loads, still running
+    await c._async_sample(dt_util.now())
+    assert c.run_is_ours is True
+    assert c.ac_since == started  # the run's true start, not "now"
+    assert c.totals.starts == starts  # the same run, not a new start
+    set_mode.clear()
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    st = hass.states.get("sensor.drift_status")
+    assert st.state == "cooling" and "minimum run" in st.attributes["reason"], st.attributes["reason"]
+    assert "off" not in _main_cmds(set_mode)
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_nothing_is_sent_while_the_ac_has_not_reported_since_a_restart(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    # (Drift's cool hadn't landed before the restart: forget it, so this isn't read as a person's change)
+    c = await _restart(hass, entry, mutate=lambda d: d.update(expected_mode="off"), ac_state=("unavailable", {}))
+    set_mode = async_mock_service(hass, "climate", "set_hvac_mode")
+    set_temp = async_mock_service(hass, "climate", "set_temperature")
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    assert not set_mode and not set_temp  # the planner wants to cool, but the AC's state is unknown
+    assert hass.states.get("sensor.drift_status").state == "waiting_for_ac"
+    # once it reports, control resumes
+    hass.states.async_set("climate.ac", "off", AC_OFF)
+    await c._async_sample(dt_util.now())
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    assert "cool" in _main_cmds(set_mode)
+    await hass.config_entries.async_unload(entry.entry_id)

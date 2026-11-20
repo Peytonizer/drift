@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Two restart gaps closed. If the AC isn't loaded when Drift starts, then once it reports Drift
+  now recognises its own run (keeping the run's true start, who began it, and not counting a
+  new start), so the minimum-run hold and the start statistics survive a full Home Assistant
+  restart. And while the AC hasn't reported since a restart, Drift sends it nothing
+  (status `waiting_for_ac`) instead of acting on a placeholder mode.
 - Forecast-aware target. When Drift runs the AC for a bedroom (tier 1 or 2) it now aims for the
   shallowest target from which the room's own drift stays in its band for the next 12 hours,
   instead of always cooling (or heating) a fixed depth inside the band edge. On a warm night

@@ -703,6 +703,15 @@ class DriftController:
             self._awaiting_first_state = False
             saved = self._loaded.get("expected_mode")
             self.expected_mode = saved if saved is not None and self._loaded.get("ac_mode") == mode else mode
+            if mode != "off" and self._loaded.get("ac_mode") == mode:
+                # The entity wasn't loaded when we started, so the placeholder "off" stood in for it.
+                # It is the same run we saved: keep its true start and who began it, and don't count
+                # it as a new start (or the compressor-cycle bookkeeping would).
+                started = self._loaded.get("ac_since")
+                parsed = dt_util.parse_datetime(started) if started else None
+                self.ac_since = dt_util.as_local(parsed) if parsed else dt_util.as_local(main.last_changed)
+                self.run_is_ours = bool(self._loaded.get("run_is_ours", False))
+                self.ac_mode_actual = mode
         elif self.ac_unavailable_since is not None:
             self.ac_unavailable_since = None
             self.ac_back_at = now
@@ -926,6 +935,11 @@ class DriftController:
             elif self.override_until and now < self.override_until:
                 self.status = "manual_override"
                 self.reason = f"Manual change detected — paused until {self.override_until.strftime('%H:%M')}. Planner says: {decision.reason}"
+            elif self._awaiting_first_state:
+                # The AC hasn't reported since the restart: its mode is a placeholder, so sending
+                # it anything now could start or stop a run we know nothing about.
+                self.status = "waiting_for_ac"
+                self.reason = f"Waiting for the AC to report after a restart. Planner says: {decision.reason}"
             else:
                 if self.override_until:
                     self.override_until = None
