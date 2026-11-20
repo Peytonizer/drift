@@ -41,5 +41,10 @@
 - Constant zones: zones listed as the AC's pressure-relief zones are never switched off
   while Drift is running, so the AC's controller can always open them. Before this they
   were closed with the other tier 3 zones when they didn't need air.
+- Daytime comfort rules, added as sub-entries on the integration page: a schedule helper's
+  weekly blocks or presence sensors (with a dwell so walking through doesn't count, and a
+  hold after the last detection), giving the listed zones a fixed range or tier 1's TOG
+  range. Nights are unchanged. Schedules are read ahead so rooms are ready when a block
+  starts. The planner now asks for each zone's band by zone rather than by tier.
 - Shadow mode (plans without acting), a two-hour pause after any manual change, and handover
   that switches listed automations off while Drift is in control and back on when it isn't.

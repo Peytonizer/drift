@@ -58,6 +58,7 @@ from .const import (
 from .energy import AcPowerLearner, EnergyTotals, split_solar_grid
 from .model import ZoneModel, solar_factor
 from .planner import Decision, ForecastPoint, PlanInput, Settings, ZoneInput, outdoor_at, plan, project_passive
+from .rules import Rule, SensorPresence, WeeklyBlocks, presence_active, resolve_band, rule_active
 from .review import NightRecorder, ZoneSample, suggestions, summarise
 from .tog import TOG_MANUAL, band_for, chart_from_options, recommend
 
@@ -141,6 +142,15 @@ class DriftController:
         self._alerts: set[str] = set()
         self._last_control: datetime | None = None
         self.bootstrap_info: dict | None = None
+        # daytime comfort rules (config subentries)
+        self.rules: list[Rule] = [
+            Rule.from_subentry(sid, sub.title, dict(sub.data))
+            for sid, sub in entry.subentries.items()
+            if sub.subentry_type == "comfort_rule"
+        ]
+        self._schedules: dict[str, WeeklyBlocks] = {}
+        self._presence: dict[tuple[str, str], dict] = {}  # (rule_id, sensor) -> {on_since, last_ok}
+        self.presence_now: dict[str, bool] = {}
         self.ac_watts_now = 0.0
         self.solar_w_now = 0.0
         self.grid_w_export: float | None = None
@@ -202,6 +212,16 @@ class DriftController:
             self._unsubs.append(
                 async_track_state_change_event(self.hass, [self.cfg[CONF_AC_PHASE_POWER]], self._on_phase_power)
             )
+        if self.rules:
+            await self._async_refresh_schedules()
+            self._unsubs.append(async_track_time_interval(self.hass, self._async_refresh_schedules, timedelta(hours=1)))
+            sched_ids = sorted({r.schedule for r in self.rules if r.trigger == "schedule" and r.schedule})
+            if sched_ids:
+                self._unsubs.append(async_track_state_change_event(self.hass, sched_ids, self._on_schedule_change))
+            pres_ids = sorted({e for r in self.rules if r.trigger == "presence" for e in r.presence})
+            if pres_ids:
+                self._unsubs.append(async_track_state_change_event(self.hass, pres_ids, self._on_presence_change))
+            self._update_presence(dt_util.now())
         t1 = next((z for z in self.zones if z.tier == 1), None)
         if t1:
             watch = [t1.sensor_id] if t1.sensor_id else []
@@ -214,6 +234,19 @@ class DriftController:
             self.hass.async_create_task(self._async_control(dt_util.now()))
 
     @callback
+    def _on_schedule_change(self, event: Event) -> None:
+        # A block starting or ending, or Matt editing the helper: re-read and re-plan.
+        async def _go():
+            await self._async_refresh_schedules()
+            await self._async_control(dt_util.now())
+
+        self.hass.async_create_task(_go())
+
+    @callback
+    def _on_presence_change(self, event: Event) -> None:
+        self._update_presence(dt_util.now())
+
+    @callback
     def _on_tier1_change(self, event: Event) -> None:
         """Check straight away if the tier 1 room has left its band, rather than waiting for
         the next 5-minute cycle. Rate-limited so a chatty sensor can't hammer the AC."""
@@ -222,7 +255,7 @@ class DriftController:
         if temp is None:
             return
         now = dt_util.now()
-        lo, hi = self.band(1, now)
+        lo, hi = self.band(t1, now)
         if lo <= temp <= hi:
             return
         if self._last_control and now - self._last_control < timedelta(minutes=2):
@@ -471,10 +504,63 @@ class DriftController:
             return today - timedelta(days=1)
         return today if (now <= today or self.in_window(now)) else today + timedelta(days=1)
 
-    def band(self, tier: int, when: datetime) -> tuple[float, float]:
-        if self.in_window(when):
-            return self.bands[f"tier{tier}_min"], self.bands[f"tier{tier}_max"]
-        return self.bands["day_min"], self.bands["day_max"]
+    def tier_band(self, tier: int) -> tuple[float, float]:
+        return self.bands[f"tier{tier}_min"], self.bands[f"tier{tier}_max"]
+
+    def band(self, zone: Zone, when: datetime) -> tuple[float, float]:
+        in_win = self.in_window(when)
+        now = dt_util.now()
+        rule_bands = [
+            self.tier_band(1) if r.band_mode == "tier1" else (r.min, r.max)
+            for r in self.rules
+            if zone.climate_id in r.zones
+            and rule_active(r, when, now, in_win, self._schedules, self.presence_now)
+        ]
+        return resolve_band(
+            zone.tier, in_win, self.tier_band(zone.tier), (self.bands["day_min"], self.bands["day_max"]), rule_bands
+        )
+
+    def band_by_id(self, zone_id: str, when: datetime) -> tuple[float, float]:
+        zone = next(z for z in self.zones if z.climate_id == zone_id)
+        return self.band(zone, when)
+
+    def active_rules(self, when: datetime) -> list[str]:
+        in_win = self.in_window(when)
+        return [r.name for r in self.rules if rule_active(r, when, when, in_win, self._schedules, self.presence_now)]
+
+    # ------------------------------------------------------------------ rules: schedules and presence
+    async def _async_refresh_schedules(self, *_args) -> None:
+        ids = sorted({r.schedule for r in self.rules if r.trigger == "schedule" and r.schedule})
+        for sid in ids:
+            try:
+                resp = await self.hass.services.async_call(
+                    "schedule", "get_schedule", {"entity_id": sid}, blocking=True, return_response=True
+                )
+                self._schedules[sid] = WeeklyBlocks.from_service((resp or {}).get(sid, {}))
+            except Exception as err:  # noqa: BLE001  (missing helper: rule falls back, never fails the cycle)
+                if sid in self._schedules or sid not in getattr(self, "_schedule_warned", set()):
+                    _LOGGER.warning("Couldn't read schedule %s for a comfort rule: %s", sid, err)
+                    self._schedule_warned = getattr(self, "_schedule_warned", set()) | {sid}
+                self._schedules.pop(sid, None)
+
+    def _update_presence(self, now: datetime) -> None:
+        for r in self.rules:
+            if r.trigger != "presence":
+                continue
+            sensors = []
+            for eid in r.presence:
+                rec = self._presence.setdefault((r.rule_id, eid), {"on_since": None, "last_ok": None})
+                st = self.hass.states.get(eid)
+                is_on = st is not None and st.state == "on"
+                if is_on:
+                    rec["on_since"] = rec["on_since"] or st.last_changed
+                    # Only a stay that met the dwell counts towards the hold afterwards.
+                    if now - rec["on_since"] >= timedelta(minutes=r.dwell_minutes):
+                        rec["last_ok"] = now
+                else:
+                    rec["on_since"] = None
+                sensors.append(SensorPresence(is_on, rec["on_since"], rec["last_ok"]))
+            self.presence_now[r.rule_id] = presence_active(r, now, sensors)
 
     # ------------------------------------------------------------------ readings
     def zone_temp(self, z: Zone) -> float | None:
@@ -559,6 +645,11 @@ class DriftController:
     async def _async_sample(self, now: datetime) -> None:
         now = dt_util.as_local(now)
         self._track_main_mode(now)
+        if self.rules:
+            was = dict(self.presence_now)
+            self._update_presence(now)
+            if self.presence_now != was:
+                self.hass.async_create_task(self._async_control(now))
 
         grid = _f(self.hass.states.get(self.cfg.get(CONF_GRID_POWER))) if self.cfg.get(CONF_GRID_POWER) else None
         if grid is not None and not self.cfg.get(CONF_GRID_IMPORT_NEGATIVE, True):
@@ -582,7 +673,7 @@ class DriftController:
                 t = self.zone_temp(z)
                 if t is None:
                     continue
-                lo, hi = self.band(z.tier, now)
+                lo, hi = self.band(z, now)
                 samples[z.name] = (z.tier, ZoneSample(t, lo, hi))
             self.night.sample(samples, ac_on, minute_of_window)
             self.night.ac_kwh += self.ac_watts_now * hours / 1000
@@ -696,7 +787,7 @@ class DriftController:
                 cloud_now=self.cloud,
                 lat=self.hass.config.latitude,
                 lon=self.hass.config.longitude,
-                band_fn=self.band,
+                band_fn=self.band_by_id,
                 window_start=self.window_start_for(now),
                 ac_mode=self.ac_mode_actual,
                 ac_since=self.ac_since,
@@ -796,7 +887,7 @@ class DriftController:
             temp = self.zone_temp(t1) if t1 else None
             extra = ""
             if t1 and temp is not None:
-                lo, hi = self.band(1, now)
+                lo, hi = self.band(t1, now)
                 extra = f" {t1.name} is {temp:.1f}°C (band {lo:g}–{hi:g})."
             await self._alert("ac_unreachable", "Drift can't control the AC", f"{problem}.{extra}")
         else:
@@ -884,7 +975,7 @@ class DriftController:
         out = []
         for h in range(0, 13):
             w = now + timedelta(hours=h)
-            inp = PlanInput(now, [], self.forecast, self.outdoor, self.cloud, 0, 0, self.band, now, "off", None, None)
+            inp = PlanInput(now, [], self.forecast, self.outdoor, self.cloud, 0, 0, self.band_by_id, now, "off", None, None)
             t, _ = outdoor_at(inp, w)
             out.append({"time": w.strftime("%H:%M"), "outdoor": round(t, 1)})
         return out

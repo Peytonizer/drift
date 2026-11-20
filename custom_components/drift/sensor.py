@@ -58,12 +58,13 @@ class StatusSensor(DriftEntity, SensorEntity):
                 else None
             ),
             "in_window": c.in_window(dt_util.now()),
+            "active_rules": c.active_rules(dt_util.now()),
             "outdoor_now": c.outdoor,
             "zones": {
                 z.name: {
                     "tier": z.tier,
                     "temp": c.zone_temp(z),
-                    "band": c.band(z.tier, dt_util.now()),
+                    "band": c.band(z, dt_util.now()),
                     "command": (
                         {"on": d.zone_commands[z.climate_id].on, "setpoint": d.zone_commands[z.climate_id].setpoint}
                         if d and z.climate_id in d.zone_commands

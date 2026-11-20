@@ -83,6 +83,22 @@ The defaults follow Love to Dream's Australian ratings. Brands differ, so edit t
 | `sensor.drift_thermal_model_samples` | What the model has learned for each room, and what the history training used (diagnostic). |
 | `button.drift_relearn_room_models_from_history` | Retrain every room's model from the last week of history. |
 
+## Daytime comfort rules
+
+Nights are fixed: the overnight window and tier bands apply every day. Daytime comfort comes from **comfort rules**, added on Drift's integration page (**Add comfort rule**); each rule can be edited or deleted on its own.
+
+- **On a schedule:** the times come from a Home Assistant `schedule` helper (Settings → Devices & services → Helpers → Schedule), which has its own block list for every day of the week. Drift reads the blocks ahead, so rooms are comfortable when a block starts rather than some time after.
+- **While someone is detected:** any listed presence sensor that has seen someone for the dwell time (default 5 minutes, so walking through doesn't count) activates the rule, which stays active for the hold time after the last detection (default 30 minutes). Limit it to certain days, e.g. weekends.
+- **Range:** a fixed range, or "tier 1's overnight range", which follows the sleepwear TOG (useful for daytime naps).
+
+A zone's range at any moment, first match wins:
+1. Overnight, tier 1 and 2 zones: their overnight range.
+2. Any active rule listing the zone (the narrowest, if several).
+3. Overnight, tier 3 zones: the tier 3 range.
+4. Otherwise: the daytime guard, the range for rooms nobody is using. Widen it (e.g. 16–28 °C) once rules cover the rooms that matter.
+
+`sensor.drift_status` lists the active rules and each zone's current range.
+
 ## Ductwork
 
 Drift uses only the controls the wall panel has: system mode and setpoint, MyZone, and each zone's on/off and setpoint. It never sets damper percentages, fan speed or the installer's constant-zone settings, so the AC's own pressure relief stays in charge. On top of that it keeps at least three zones open while running (adjustable) and never switches off a zone listed as a constant zone.

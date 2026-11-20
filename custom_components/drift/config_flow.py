@@ -5,7 +5,14 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    SubentryFlowResult,
+)
 from homeassistant.core import callback
 from homeassistant.helpers import selector as sel
 
@@ -199,6 +206,11 @@ class DriftConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         return DriftOptionsFlow()
 
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(cls, config_entry: ConfigEntry) -> dict[str, type[ConfigSubentryFlow]]:
+        return {"comfort_rule": ComfortRuleFlow}
+
 
 class DriftOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
@@ -250,3 +262,79 @@ class DriftOptionsFlow(OptionsFlow):
 
     def _save(self) -> ConfigFlowResult:
         return self.async_create_entry(data={**self.config_entry.options, **self._opts})
+
+
+WEEKDAY_KEYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def _select(options: list[str], key: str, multiple: bool = False) -> sel.SelectSelector:
+    return sel.SelectSelector(
+        sel.SelectSelectorConfig(
+            options=options, translation_key=key, multiple=multiple, mode=sel.SelectSelectorMode.DROPDOWN
+        )
+    )
+
+
+def rule_schema(zone_ids: list[str]) -> vol.Schema:
+    zones_sel = sel.EntitySelector(sel.EntitySelectorConfig(include_entities=zone_ids, multiple=True))
+    return vol.Schema(
+        {
+            vol.Required("name"): str,
+            vol.Required("zones"): zones_sel,
+            vol.Required("trigger", default="schedule"): _select(["schedule", "presence"], "rule_trigger"),
+            vol.Optional("schedule"): _ent("schedule"),
+            vol.Optional("presence"): _ent("binary_sensor", multiple=True),
+            vol.Optional("presence_days", default=["saturday", "sunday"]): _select(WEEKDAY_KEYS, "weekday", multiple=True),
+            vol.Optional("dwell_minutes", default=5): _num(0, 60, 1, "min"),
+            vol.Optional("hold_minutes", default=30): _num(0, 240, 5, "min"),
+            vol.Required("band", default="fixed"): _select(["fixed", "tier1"], "rule_band"),
+            vol.Optional("min", default=21.0): _num(12, 30, 0.5, "°C"),
+            vol.Optional("max", default=25.0): _num(14, 32, 0.5, "°C"),
+        }
+    )
+
+
+class ComfortRuleFlow(ConfigSubentryFlow):
+    """Add or edit one daytime comfort rule."""
+
+    def _zone_ids(self) -> list[str]:
+        entry = self._get_entry()
+        cfg = {**entry.data, **entry.options}
+        ids = [cfg.get(CONF_TIER1_ZONE)] + list(cfg.get(CONF_TIER2_ZONES) or []) + list(cfg.get(CONF_TIER3_ZONES) or [])
+        return [i for i in ids if i]
+
+    def _validate(self, data: dict) -> dict[str, str]:
+        errors = {}
+        if not data.get("zones"):
+            errors["zones"] = "no_zones"
+        if data["trigger"] == "schedule" and not data.get("schedule"):
+            errors["schedule"] = "schedule_required"
+        if data["trigger"] == "presence":
+            if not data.get("presence"):
+                errors["presence"] = "presence_required"
+            if not data.get("presence_days"):
+                errors["presence_days"] = "days_required"
+        if data["band"] == "fixed" and float(data.get("min", 0)) > float(data.get("max", 0)) - 1:
+            errors["min"] = "band_too_narrow"
+        return errors
+
+    async def _form(self, step: str, user_input: dict | None, current: dict) -> SubentryFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = self._validate(user_input)
+            if not errors:
+                data = {k: v for k, v in user_input.items() if v not in (None, "", [])}
+                if step == "user":
+                    return self.async_create_entry(title=data["name"], data=data)
+                return self.async_update_and_abort(
+                    self._get_entry(), self._get_reconfigure_subentry(), title=data["name"], data=data
+                )
+            current = user_input
+        schema = self.add_suggested_values_to_schema(rule_schema(self._zone_ids()), current)
+        return self.async_show_form(step_id=step, data_schema=schema, errors=errors)
+
+    async def async_step_user(self, user_input: dict | None = None) -> SubentryFlowResult:
+        return await self._form("user", user_input, {})
+
+    async def async_step_reconfigure(self, user_input: dict | None = None) -> SubentryFlowResult:
+        return await self._form("reconfigure", user_input, dict(self._get_reconfigure_subentry().data))

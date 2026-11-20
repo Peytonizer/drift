@@ -19,7 +19,7 @@ from typing import Callable
 
 from .model import ZoneModel, solar_factor
 
-BandFn = Callable[[int, datetime], tuple[float, float]]
+BandFn = Callable[[str, datetime], tuple[float, float]]  # (zone_id, when) -> (min, max)
 
 
 @dataclass
@@ -171,7 +171,7 @@ def _episodes(inp: PlanInput, zone: ZoneInput, traj: list[tuple[datetime, float]
     episodes: list[dict] = []
     cur: dict | None = None
     for when, temp in traj:
-        lo, hi = inp.band_fn(zone.tier, when)
+        lo, hi = inp.band_fn(zone.zone_id, when)
         excess = (temp - hi) if mode == "cool" else (lo - temp)
         if excess > 0:
             if cur is None:
@@ -233,18 +233,18 @@ def find_need(
 def _hard_violation(inp: PlanInput, zone: ZoneInput, mode: str) -> bool:
     if zone.temp is None:
         return False
-    lo, hi = inp.band_fn(zone.tier, inp.now)
+    lo, hi = inp.band_fn(zone.zone_id, inp.now)
     m = inp.settings.hard_margin_c
     return zone.temp > hi + m if mode == "cool" else zone.temp < lo - m
 
 
 def _target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
     s = inp.settings
-    lo, hi = inp.band_fn(zone.tier, inp.now)
+    lo, hi = inp.band_fn(zone.zone_id, inp.now)
     # aim for the band that applies over the next couple of hours, so pre-cooling
     # before the overnight window targets the overnight band, not the day band
     ahead = max(inp.now + timedelta(hours=2), inp.window_start) if precool else inp.now + timedelta(hours=2)
-    lo2, hi2 = inp.band_fn(zone.tier, ahead)
+    lo2, hi2 = inp.band_fn(zone.zone_id, ahead)
     lo, hi = max(lo, lo2), min(hi, hi2)
     if lo > hi:
         lo, hi = lo2, hi2
@@ -260,7 +260,7 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
     zones = [z for z in inp.zones if z.temp is not None]
     for z in zones:
         target = _target(inp, z, mode, precool)
-        lo, hi = inp.band_fn(z.tier, inp.now)
+        lo, hi = inp.band_fn(z.zone_id, inp.now)
         if z.tier == 1 or z.constant:
             # Constant zones are how the AC relieves duct pressure; leaving them on (with a
             # setpoint) lets its controller open them whenever it needs to.
@@ -354,7 +354,7 @@ def plan(inp: PlanInput) -> Decision:
             if z.temp is None:
                 continue
             tgt = _target(inp, z, mode, precool)
-            lo, hi = inp.band_fn(z.tier, now)
+            lo, hi = inp.band_fn(z.zone_id, now)
             if z.tier <= 2:
                 if (mode == "cool" and z.temp > tgt + 0.2) or (mode == "heat" and z.temp < tgt - 0.2):
                     unsatisfied.append(z)

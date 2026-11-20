@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "drift"
 pkg = types.ModuleType("sc")
 pkg.__path__ = [str(ROOT)]
 sys.modules["sc"] = pkg
-for name in ("const", "model", "planner", "energy", "review", "tog", "bootstrap"):
+for name in ("const", "model", "planner", "energy", "review", "tog", "bootstrap", "rules"):
     spec = importlib.util.spec_from_file_location(f"sc.{name}", ROOT / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"sc.{name}"] = mod
@@ -30,11 +30,15 @@ BANDS = {1: (21, 25), 2: (19, 25), 3: (17, 27)}
 DAY = (18, 26)
 
 
+ZONE_TIERS = {"nursery": 1, "master": 2}
+
+
 def band_fn_factory(start="17:30", end="07:00"):
     sh, sm = map(int, start.split(":"))
     eh, em = map(int, end.split(":"))
 
-    def band(tier, when):
+    def band(zone_id, when):
+        tier = ZONE_TIERS.get(zone_id, 3)
         mins = when.hour * 60 + when.minute
         s, e = sh * 60 + sm, eh * 60 + em
         in_win = mins >= s or mins < e
@@ -204,7 +208,7 @@ def test_fewer_starts_than_threshold_automation():
             if mode == "cool":
                 rate -= truth.cool_rate
             temp += rate * 5 / 60
-            lo, hi = band_fn_factory()(1, t)
+            lo, hi = band_fn_factory()("nursery", t)
             if not lo <= temp <= hi:
                 out_min += 5
             t += timedelta(minutes=5)
@@ -289,7 +293,8 @@ def test_tog_recommendation_follows_natural_overnight_temps():
 TOG10 = {1: (20, 24), 2: (19, 25), 3: (17, 27)}
 
 
-def band_tog10(tier, when):
+def band_tog10(zone_id, when):
+    tier = ZONE_TIERS.get(zone_id, 3)
     mins = when.hour * 60 + when.minute
     return TOG10[tier] if (mins >= 17 * 60 + 30 or mins < 7 * 60) else DAY
 
@@ -394,3 +399,77 @@ def test_constant_zones_are_never_switched_off():
     assert d.action == "cool"
     assert d.zone_commands["lounge"].on
     assert not d.zone_commands["living"].on  # an ordinary tier 3 zone still closes
+
+
+
+# ---- daytime comfort rules
+from datetime import time as dtime  # noqa: E402
+from sc.rules import Rule, SensorPresence, WeeklyBlocks, presence_active, resolve_band, rule_active  # noqa: E402
+
+OFFICE = WeeklyBlocks.from_service(
+    {d: [{"from": "08:00:00", "to": "16:30:00"}] for d in ["monday", "tuesday", "wednesday", "thursday", "friday"]}
+)
+
+
+def test_weekly_blocks_cover_the_right_days_and_times():
+    mon = datetime(2026, 11, 23, 9, 0, tzinfo=AEDT)  # a Monday
+    assert OFFICE.covers(mon)
+    assert not OFFICE.covers(mon.replace(hour=7, minute=59))
+    assert not OFFICE.covers(mon.replace(hour=16, minute=30))
+    assert not OFFICE.covers(mon + timedelta(days=5))  # Saturday
+    wb = WeeklyBlocks.from_service({"monday": [{"from": dtime(7, 0), "to": "24:00:00"}]})
+    assert wb.covers(mon.replace(hour=23, minute=50))
+
+
+def test_band_precedence():
+    guard, t1, t3 = (16, 28), (20, 24), (17, 27)
+    assert resolve_band(1, True, t1, guard, [(21, 25)]) == t1  # tier 1 keeps its night band
+    assert resolve_band(3, True, t3, guard, [(21, 25)]) == (21, 25)  # tier 3 takes the rule at night
+    assert resolve_band(3, False, t3, guard, []) == guard
+    assert resolve_band(3, False, t3, guard, [(21, 25), (22, 26)]) == (22, 25)  # narrowest
+    assert resolve_band(3, False, t3, guard, [(21, 22), (24, 26)]) == (21, 22)  # disjoint: first wins
+
+
+def test_presence_needs_a_real_stay_and_holds_afterwards():
+    sat = datetime(2026, 11, 21, 10, 0, tzinfo=AEDT)
+    r = Rule("r1", "Weekend", ["climate.ac_lounge"], "presence", presence=["b"], presence_days=["saturday", "sunday"])
+    assert not presence_active(r, sat, [SensorPresence(True, sat - timedelta(minutes=3), None)])
+    assert presence_active(r, sat, [SensorPresence(True, sat - timedelta(minutes=6), sat)])
+    assert presence_active(r, sat, [SensorPresence(False, None, sat - timedelta(minutes=25))])
+    assert not presence_active(r, sat, [SensorPresence(False, None, sat - timedelta(minutes=35))])
+    tue = sat + timedelta(days=3)
+    assert not presence_active(r, tue, [SensorPresence(True, tue - timedelta(minutes=30), tue)])
+
+
+def test_presence_rule_looks_two_hours_ahead_and_never_runs_at_night():
+    sat = datetime(2026, 11, 21, 10, 0, tzinfo=AEDT)
+    r = Rule("r1", "Weekend", ["z"], "presence", presence=["b"], presence_days=["saturday"])
+    on = {"r1": True}
+    assert rule_active(r, sat + timedelta(minutes=90), sat, False, {}, on)
+    assert not rule_active(r, sat + timedelta(hours=3), sat, False, {}, on)
+    assert not rule_active(r, sat, sat, True, {}, on)
+    assert not rule_active(r, sat, sat, False, {}, {"r1": False})
+
+
+def test_schedule_rule_preconditions_before_it_starts():
+    """Office rule 08:00-16:30 at 21-25; empty-room guard 16-28. A warm office at 26.4
+    needs cooling to be under 25 by 08:00, so the AC starts shortly before, not at 07:00."""
+    mon = datetime(2026, 11, 23, 0, 0, tzinfo=AEDT)
+    rule = Rule("o", "Office", ["office"], "schedule", schedule="schedule.office", min=21, max=25)
+
+    def band(zone_id, when):
+        in_win = when.hour * 60 + when.minute >= 17 * 60 + 30 or when.hour < 7
+        rb = [(rule.min, rule.max)] if zone_id in rule.zones and rule_active(rule, when, when, in_win, {"schedule.office": OFFICE}, {}) else []
+        return resolve_band(3, in_win, (17, 27), (16, 28), rb)
+
+    f = hot_forecast(mon, {7: 26, 8: 28, 9: 30, 10: 31})
+    def at(h, m):
+        now = mon.replace(hour=h, minute=m)
+        zs = [ZoneInput("office", "Office", 3, 26.4, ZoneModel(a=0.03, b=0.2))]
+        inp = mk(now, zs, f, 26, cloud=50, min_open_zones=1)
+        inp.band_fn = band
+        return plan(inp)
+    assert at(7, 0).action == "off"
+    d = at(7, 30)
+    assert d.action == "cool", d.reason
+    assert d.zone_commands["office"].setpoint == 23.5  # 25 - cool depth, the rule's band ahead

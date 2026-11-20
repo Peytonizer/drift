@@ -117,5 +117,83 @@
     "error": {
       "min_above_max": "'From' must be below 'to'."
     }
+  },
+  "config_subentries": {
+    "comfort_rule": {
+      "entry_type": "Comfort rule",
+      "initiate_flow": {
+        "user": "Add comfort rule"
+      },
+      "step": {
+        "user": {
+          "title": "Comfort rule",
+          "description": "Gives the chosen zones a comfort range while the rule is active, outside the overnight window (tier 3 zones also inside it). Times come from a Home Assistant schedule helper; presence rules follow your occupancy sensors.",
+          "data": {
+            "name": "Rule name",
+            "zones": "Zones",
+            "trigger": "Active when",
+            "schedule": "Schedule helper (for 'on a schedule')",
+            "presence": "Presence sensors (for 'someone is detected'; any one activates the rule)",
+            "presence_days": "Days presence counts",
+            "dwell_minutes": "Detected for at least",
+            "hold_minutes": "Stay active after the last detection for",
+            "band": "Comfort range",
+            "min": "Range from",
+            "max": "Range to"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit comfort rule",
+          "data": {
+            "name": "Rule name",
+            "zones": "Zones",
+            "trigger": "Active when",
+            "schedule": "Schedule helper (for 'on a schedule')",
+            "presence": "Presence sensors (for 'someone is detected'; any one activates the rule)",
+            "presence_days": "Days presence counts",
+            "dwell_minutes": "Detected for at least",
+            "hold_minutes": "Stay active after the last detection for",
+            "band": "Comfort range",
+            "min": "Range from",
+            "max": "Range to"
+          }
+        }
+      },
+      "error": {
+        "no_zones": "Pick at least one zone.",
+        "schedule_required": "Pick the schedule helper.",
+        "presence_required": "Pick at least one presence sensor.",
+        "days_required": "Pick at least one day.",
+        "band_too_narrow": "'From' must be at least 1 °C below 'to'."
+      },
+      "abort": {
+        "reconfigure_successful": "Rule updated."
+      }
+    }
+  },
+  "selector": {
+    "rule_trigger": {
+      "options": {
+        "schedule": "On a schedule",
+        "presence": "While someone is detected"
+      }
+    },
+    "rule_band": {
+      "options": {
+        "fixed": "The range below",
+        "tier1": "Tier 1's overnight range (follows the TOG)"
+      }
+    },
+    "weekday": {
+      "options": {
+        "monday": "Monday",
+        "tuesday": "Tuesday",
+        "wednesday": "Wednesday",
+        "thursday": "Thursday",
+        "friday": "Friday",
+        "saturday": "Saturday",
+        "sunday": "Sunday"
+      }
+    }
   }
 }
