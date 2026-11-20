@@ -51,6 +51,26 @@ class Series:
         return self.times[i]
 
 
+def merge_outdoor_history(
+    weather: list[tuple[datetime, float, float | None]],
+    observed: list[tuple[datetime, float | None]],
+) -> tuple[list[tuple[datetime, float, float | None]], str | None]:
+    """Prefer real observations over the weather entity's model values for training.
+
+    The observation sensor usually starts recording later than the weather entity, so the
+    weather values are kept for the time before its first reading. Observations carry no cloud
+    cover, so each borrows the weather entity's cloud at that moment for the solar term.
+    Returns the merged series and when observations start (ISO), or None if there were none.
+    """
+    obs = sorted((t, v) for t, v in observed if v is not None)
+    if not obs:
+        return weather, None
+    first = obs[0][0]
+    cloud = Series.from_points([(t, c) for t, _, c in weather if c is not None])
+    merged = [p for p in weather if p[0] < first] + [(t, v, cloud.at(t)) for t, v in obs]
+    return merged, first.isoformat()
+
+
 def fit_from_history(
     model: ZoneModel,
     temps: list[tuple[datetime, float]],

@@ -273,12 +273,14 @@ class DriftController:
 
         from homeassistant.components.recorder import get_instance, history
 
-        from .bootstrap import fit_from_history
+        from .bootstrap import fit_from_history, merge_outdoor_history
 
         end = dt_util.now()
         start = end - timedelta(days=7)
         main_id = self.cfg[CONF_MAIN_CLIMATE]
         ids = {main_id, self.cfg[CONF_WEATHER]}
+        if self.cfg.get(CONF_OUTDOOR_SENSOR):
+            ids.add(self.cfg[CONF_OUTDOOR_SENSOR])
         for z in self.zones:
             ids.add(z.climate_id)
             if z.sensor_id:
@@ -316,7 +318,10 @@ class DriftController:
             t = st.attributes.get("temperature")
             if t is not None:
                 outdoor.append((st.last_updated, float(t), st.attributes.get("cloud_coverage")))
-        info = {"at": end.isoformat(), "days": 7, "zones": {}}
+        outdoor, observed_from = merge_outdoor_history(
+            outdoor, [(st.last_updated, _f(st)) for st in rows(self.cfg.get(CONF_OUTDOOR_SENSOR))]
+        )
+        info = {"at": end.isoformat(), "days": 7, "zones": {}, "outdoor_observed_from": observed_from}
         for z in self.zones:
             if z.sensor_id:
                 temps = [(st.last_updated, _f(st)) for st in rows(z.sensor_id)]

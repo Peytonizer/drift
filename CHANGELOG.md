@@ -7,6 +7,8 @@
   carried into the forecast, fading out over three hours, because a model running warm now
   is usually warm for the next few hours too. Falls back to the weather entity when the
   sensor goes quiet. Prompted by met.no reading 24 °C on a rainy 19 °C evening.
+- Relearning from history uses the outdoor sensor's readings where it has them, and the
+  weather entity's values only for the time before the sensor started recording.
 - Forecast-aware planner: projects each zone six hours ahead with the AC off and starts at
   the latest moment that keeps it in band, so rooms are left to cool or warm naturally when
   the forecast allows. Small, short excursions (≤ 0.3 °C) are tolerated rather than starting

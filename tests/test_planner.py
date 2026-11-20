@@ -473,3 +473,17 @@ def test_schedule_rule_preconditions_before_it_starts():
     d = at(7, 30)
     assert d.action == "cool", d.reason
     assert d.zone_commands["office"].setpoint == 23.5  # 25 - cool depth, the rule's band ahead
+
+
+def test_merge_outdoor_history_prefers_observations_and_borrows_cloud():
+    from sc.bootstrap import merge_outdoor_history
+
+    t0 = datetime(2026, 11, 13, 12, tzinfo=timezone.utc)
+    weather = [(t0 + timedelta(hours=h), 25.0, 80.0 + h) for h in range(10)]
+    assert merge_outdoor_history(weather, []) == (weather, None)
+
+    obs = [(t0 + timedelta(hours=4, minutes=5), 19.0), (t0 + timedelta(hours=6), None), (t0 + timedelta(hours=7), 18.5)]
+    merged, since = merge_outdoor_history(weather, obs)
+    assert since == (t0 + timedelta(hours=4, minutes=5)).isoformat()
+    assert [p[1] for p in merged] == [25.0] * 5 + [19.0, 18.5]  # model values only before the first observation
+    assert merged[5][2] == 84.0 and merged[6][2] == 87.0
