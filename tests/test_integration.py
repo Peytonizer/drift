@@ -414,3 +414,195 @@ async def test_manual_pause_and_last_stop_survive_a_reload(hass, freezer):
     assert hass.states.get("sensor.drift_status").state == "manual_override"
     assert not [x for x in set_mode if x.data["entity_id"] == "climate.ac"]
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+# --- IDEAS 13: restart and handover safety ---------------------------------------------------
+
+AC_COOL = {"current_temperature": 26, "temperature": 23.5, "hvac_modes": ["off", "cool", "heat"]}
+AC_OFF = {"current_temperature": 26, "temperature": 23.5, "hvac_modes": ["off", "cool", "heat"]}
+
+
+async def _restart(hass, entry, mutate=None, ac_state=None):
+    """Stop Drift, optionally rewrite its saved state or the AC's state, and start it again."""
+    from custom_components.drift.const import STORAGE_KEY, STORAGE_VERSION
+    from homeassistant.helpers.storage import Store
+
+    await hass.config_entries.async_unload(entry.entry_id)
+    if mutate:
+        store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}")
+        data = await store.async_load()
+        mutate(data)
+        await store.async_save(data)
+    if ac_state:
+        hass.states.async_set("climate.ac", *ac_state)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entry.runtime_data
+
+
+async def _land(hass, freezer, c, mode="cool"):
+    """The AC reports the mode Drift sent, and the per-minute check sees it land."""
+    hass.states.async_set("climate.ac", mode, AC_COOL)
+    freezer.tick(timedelta(seconds=60))
+    await c._async_sample(dt_util.now())
+    assert c.pending is None
+
+
+async def test_inherited_run_is_not_held_after_restart(hass, freezer):
+    freezer.move_to("2026-11-20 19:00:00+11:00")
+    await _setup_states(hass, nursery=22.0, outdoor=19.0, forecast_temps=[19, 18, 18, 17, 17, 16, 16, 16])
+    for n in ("master", "office", "lounge", "living"):
+        _zone(hass, n, 22.0)
+    set_mode = async_mock_service(hass, "climate", "set_hvac_mode")
+    async_mock_service(hass, "climate", "set_temperature")
+    async_mock_service(hass, "automation", "turn_off")
+    entry = await _config_flow(hass)
+    async_mock_service(hass, "select", "select_option")
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.drift_control_enabled"}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.drift_status").state == "idle"
+
+    # Someone (or an older Drift) left the AC running; the saved state predates run_is_ours/expected_mode.
+    def older_version(data):
+        data.pop("run_is_ours", None)
+        data.pop("expected_mode", None)
+
+    set_mode.clear()
+    hass.states.async_set("climate.ac", "cool", AC_COOL)
+    c = await _restart(hass, entry, older_version)
+    assert c.run_is_ours is False
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    assert "off" in _main_cmds(set_mode)
+    assert hass.states.get("sensor.drift_status").state == "idle", c.reason
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_drift_run_is_held_across_restart(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    await _land(hass, freezer, c)
+    assert c.run_is_ours is True
+    freezer.tick(timedelta(minutes=4))  # five minutes into the run
+
+    c = await _restart(hass, entry)
+    assert c.run_is_ours is True
+    set_mode.clear()
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    st = hass.states.get("sensor.drift_status")
+    assert st.state == "cooling" and "minimum run" in st.attributes["reason"], st.attributes["reason"]
+    assert "off" not in _main_cmds(set_mode)
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_manual_change_right_after_restart_is_respected(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    await _land(hass, freezer, c)
+
+    # restart with the AC entity not loaded yet, then it appears as it was left
+    c = await _restart(hass, entry, ac_state=("unavailable", {}))
+    assert c.ac_unavailable_since is None and c._awaiting_first_state
+    hass.states.async_set("climate.ac", "cool", AC_COOL)
+    freezer.tick(timedelta(seconds=30))
+    await c._async_sample(dt_util.now())
+    assert not c._awaiting_first_state and c.ac_back_at is None  # no "recently back" grace
+    assert c.expected_mode == "cool"
+
+    # two minutes later a person turns it off
+    freezer.tick(timedelta(minutes=2))
+    hass.states.async_set("climate.ac", "off", AC_OFF)
+    set_mode.clear()
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.drift_status").state == "manual_override"
+    assert "cool" not in _main_cmds(set_mode)
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_first_state_after_restart_that_differs_is_the_baseline(hass, freezer):
+    """If the AC isn't as we left it when it first reports, that is the starting point, not an override."""
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    await _land(hass, freezer, c)
+    c = await _restart(hass, entry, ac_state=("unavailable", {}))
+    hass.states.async_set("climate.ac", "off", AC_OFF)
+    await c._async_sample(dt_util.now())
+    assert c.expected_mode == "off" and c.ac_back_at is None
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_real_outage_still_gets_grace(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    await _land(hass, freezer, c)
+    hass.states.async_set("climate.ac", "unavailable", {})
+    for _ in range(3):
+        freezer.tick(timedelta(seconds=60))
+        await c._async_sample(dt_util.now())
+    assert c.ac_unavailable_since is not None
+    hass.states.async_set("climate.ac", "off", AC_OFF)
+    freezer.tick(timedelta(seconds=60))
+    await c._async_sample(dt_util.now())
+    assert c.ac_back_at is not None
+    await c._async_control(dt_util.now())
+    assert c.override_until is None
+    assert _main_cmds(set_mode)[-1] == "cool"  # resent, not respected as a manual stop
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_change_after_command_landed_is_manual(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    await _land(hass, freezer, c)
+    assert c._landed_at is not None
+    freezer.tick(timedelta(seconds=60))  # still inside the 3-minute echo allowance
+    hass.states.async_set("climate.ac", "off", AC_OFF)
+    set_mode.clear()
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.drift_status").state == "manual_override"
+    assert c.override_until is not None
+    assert "cool" not in _main_cmds(set_mode)
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_slow_echo_is_not_an_override(hass, freezer):
+    entry, set_mode, _, _ = await _enabled_hot(hass, freezer)
+    c = entry.runtime_data
+    for _ in range(2):  # the AC still says "off" 90+ seconds after the command
+        freezer.tick(timedelta(seconds=50))
+        await c._async_sample(dt_util.now())
+    assert c.pending is not None and c._landed_at is None
+    await c._async_control(dt_util.now())
+    assert c.override_until is None
+    hass.states.async_set("climate.ac", "cool", AC_COOL)  # the echo finally arrives
+    freezer.tick(timedelta(seconds=30))
+    await c._async_sample(dt_util.now())
+    await c._async_control(dt_util.now())
+    assert c.override_until is None
+    assert hass.states.get("sensor.drift_status").state == "cooling"
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_ac_since_and_last_stop_are_local_time(hass, freezer):
+    """main.last_changed is UTC; reasons like 'minimum run until 18:14' must read in local time."""
+    freezer.move_to("2026-11-20 19:00:00+11:00")  # 08:00 UTC
+    await _setup_states(hass, nursery=26.4, outdoor=31, forecast_temps=[31, 30, 29, 28, 27, 26, 25, 24])
+    hass.states.async_set("climate.ac", "cool", AC_COOL)
+    async_mock_service(hass, "climate", "set_hvac_mode")
+    async_mock_service(hass, "climate", "set_temperature")
+    async_mock_service(hass, "automation", "turn_off")
+    entry = await _config_flow(hass)
+    c = entry.runtime_data
+    assert c.ac_since.utcoffset() == timedelta(hours=11) and c.ac_since.hour == 19
+
+    def saved_in_utc(data):
+        data["last_stop"] = "2026-11-20T07:00:00+00:00"
+        data["override_until"] = "2026-11-20T09:00:00+00:00"
+
+    c = await _restart(hass, entry, saved_in_utc)
+    assert c.last_stop.utcoffset() == timedelta(hours=11) and c.last_stop.hour == 18
+    assert c.override_until.utcoffset() == timedelta(hours=11) and c.override_until.hour == 20
+    await hass.config_entries.async_unload(entry.entry_id)

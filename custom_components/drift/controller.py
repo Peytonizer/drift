@@ -137,6 +137,14 @@ class DriftController:
         self.running_precool = False
         self.expected_mode: str | None = None
         self.last_cmd: datetime | None = None
+        # Only a run Drift started is held to the minimum run time (see PlanInput.run_is_ours).
+        self.run_is_ours: bool = False
+        # When Drift's last command was seen to land. After that, any departure from it is a
+        # person, however soon it comes (the 3-minute echo allowance only covers a command in flight).
+        self._landed_at: datetime | None = None
+        # True from a restart until the AC entity first reports a state: not loaded yet isn't an outage.
+        self._awaiting_first_state = False
+        self._loaded: dict = {}
         self.override_until: datetime | None = None
         # MyAir can drop commands or go unavailable for a while. These track that so a
         # glitch is retried and reported rather than mistaken for someone changing the AC.
@@ -184,6 +192,7 @@ class DriftController:
 
     async def async_start(self) -> None:
         data = await self._store.async_load() or {}
+        self._loaded = data
         self.enabled = data.get("enabled", False)
         self.precool_enabled = data.get("precool_enabled", True)
         self.bands.update(data.get("bands", {}))
@@ -206,16 +215,22 @@ class DriftController:
         main = self.hass.states.get(self.cfg[CONF_MAIN_CLIMATE])
         self.ac_mode_actual = main.state if main and main.state in ACTIVE_MODES else "off"
         if self.ac_mode_actual != "off":
-            self.ac_since = main.last_changed
-        when = lambda k: dt_util.parse_datetime(data[k]) if data.get(k) else None  # noqa: E731
+            # last_changed is UTC; the reasons shown to people use local clock time
+            self.ac_since = dt_util.as_local(main.last_changed)
+        when = lambda k: dt_util.as_local(dt_util.parse_datetime(data[k])) if data.get(k) else None  # noqa: E731
         self.override_until = when("override_until")
         self.last_stop = when("last_stop")
         if data.get("ac_mode") == self.ac_mode_actual and when("ac_since"):
             # still in the run we saved: keep its true start for the minimum-run guard
             self.ac_since = when("ac_since")
+        # A run is only Drift's if we saved it as such and it's still the same run. A missing key
+        # (saved by an older version) means an inherited run, which is never held.
+        self.run_is_ours = bool(data.get("run_is_ours", False)) and data.get("ac_mode") == self.ac_mode_actual
         self.expected_mode = self.ac_mode_actual
         if main is None or main.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            self.ac_unavailable_since = dt_util.now()
+            # A restart isn't an outage: the entity just isn't loaded yet. Wait for its first
+            # state instead of starting the "recently back" grace that would resend a person's change.
+            self._awaiting_first_state = True
 
         self._unsubs.append(async_track_time_interval(self.hass, self._async_sample, timedelta(seconds=SAMPLE_INTERVAL_SEC)))
         self._unsubs.append(async_track_time_interval(self.hass, self._async_control, timedelta(minutes=CONTROL_INTERVAL_MIN)))
@@ -390,6 +405,8 @@ class DriftController:
                 "last_stop": self.last_stop.isoformat() if self.last_stop else None,
                 "ac_since": self.ac_since.isoformat() if self.ac_since else None,
                 "ac_mode": self.ac_mode_actual,
+                "run_is_ours": self.run_is_ours,
+                "expected_mode": self.expected_mode,
             }
         )
 
@@ -671,16 +688,27 @@ class DriftController:
     def _track_main_mode(self, now: datetime) -> None:
         main = self.hass.states.get(self.cfg[CONF_MAIN_CLIMATE])
         if main is None or main.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            if self._awaiting_first_state:
+                return  # still starting up: not an outage
             # Hold the last known mode: an outage isn't a stop, and isn't a manual change.
             if self.ac_unavailable_since is None:
                 self.ac_unavailable_since = now
                 _LOGGER.warning("Main AC unavailable; holding last known mode %s", self.ac_mode_actual)
             return
-        if self.ac_unavailable_since is not None:
+        mode = main.state if main.state in ACTIVE_MODES else "off"
+        if self._awaiting_first_state:
+            # First state since the restart. Not an outage return, so no "recently back" grace: a
+            # person's change in the next few minutes must be respected, not resent. If the AC is
+            # as we left it, carry on expecting what we expected; otherwise take it as the baseline.
+            self._awaiting_first_state = False
+            saved = self._loaded.get("expected_mode")
+            self.expected_mode = saved if saved is not None and self._loaded.get("ac_mode") == mode else mode
+        elif self.ac_unavailable_since is not None:
             self.ac_unavailable_since = None
             self.ac_back_at = now
-        mode = main.state if main.state in ACTIVE_MODES else "off"
         if mode != self.ac_mode_actual:
+            if mode == "off" or mode != self.expected_mode:
+                self.run_is_ours = False  # stopped, or started by someone else
             if mode == "off":
                 self.last_stop = now
                 self.hass.async_create_task(self._async_save())
@@ -847,6 +875,7 @@ class DriftController:
                 running_precool=self.running_precool,
                 solar_surplus_w=surplus,
                 settings=self._settings(),
+                run_is_ours=self.run_is_ours,
             )
             decision = plan(inp)
             self.decision = decision
@@ -870,7 +899,9 @@ class DriftController:
                 and self.pending is None
                 and not recently_back
             ):
-                if self.last_cmd is None or now - self.last_cmd > timedelta(minutes=3):
+                # Within 3 minutes of a command a mismatch may just be a slow MyAir echo, but once
+                # the command has landed, a later departure from it is a person.
+                if self.last_cmd is None or now - self.last_cmd > timedelta(minutes=3) or self._landed_at is not None:
                     self.override_until = now + timedelta(minutes=int(self.cfg[CONF_OVERRIDE_MINUTES]))
                     self.expected_mode = None
                     _LOGGER.info("Manual AC change detected; pausing until %s", self.override_until)
@@ -911,6 +942,7 @@ class DriftController:
         main = self.cfg[CONF_MAIN_CLIMATE]
         await self._call("climate", "set_hvac_mode", {"entity_id": main, "hvac_mode": mode})
         self.last_cmd = now
+        self._landed_at = None
         if self.pending and self.pending["mode"] == mode:
             self.pending["last"] = now
             self.pending["attempts"] += 1
@@ -926,6 +958,7 @@ class DriftController:
         if self.pending:
             if self.ac_unavailable_since is None and self.ac_mode_actual == self.pending["mode"]:
                 self.pending = None
+                self._landed_at = now
             elif now - self.pending["last"] >= timedelta(seconds=90) and self.pending["attempts"] < 3:
                 _LOGGER.warning("AC hasn't reported %s yet; resending (attempt %s)", self.pending["mode"], self.pending["attempts"] + 1)
                 await self._send_mode(self.pending["mode"], now)
@@ -1007,6 +1040,7 @@ class DriftController:
         if drv and mst and mst.attributes.get("temperature") != drv.setpoint:
             await self._call("climate", "set_temperature", {"entity_id": main, "temperature": drv.setpoint})
         self.expected_mode = d.action
+        self.run_is_ours = True
 
     # ------------------------------------------------------------------ for entities
     def tier1_prediction(self, minutes: int) -> float | None:
@@ -1028,7 +1062,7 @@ class DriftController:
         out = []
         for h in range(0, 13):
             w = now + timedelta(hours=h)
-            inp = PlanInput(now, [], self.planning_forecast(now), self.outdoor, self.cloud, 0, 0, self.band_by_id, now, "off", None, None)
+            inp = PlanInput(now, [], self.planning_forecast(now), self.outdoor, self.cloud, 0, 0, self.band_by_id, now, "off", None, None, run_is_ours=self.run_is_ours)
             t, _ = outdoor_at(inp, w)
             out.append({"time": w.strftime("%H:%M"), "outdoor": round(t, 1)})
         return out

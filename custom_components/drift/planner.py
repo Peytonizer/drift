@@ -80,6 +80,10 @@ class PlanInput:
     running_precool: bool = False
     solar_surplus_w: float | None = None  # export available if AC were off
     settings: Settings = field(default_factory=Settings)
+    # False when the run in progress wasn't started by Drift (inherited across a restart or begun
+    # by a person): the minimum-run hold exists to protect the compressor from Drift's own
+    # short-cycling, not to keep a run nobody here asked for.
+    run_is_ours: bool = True
 
 
 @dataclass
@@ -373,7 +377,7 @@ def plan(inp: PlanInput) -> Decision:
         future_need = [n for n in needs if n.mode == mode]
         opposite_due = [n for n in due if n.mode != mode and n.tier == 1]
 
-        if runtime < min_run and not opposite_due:
+        if inp.run_is_ours and runtime < min_run and not opposite_due:
             return build(mode, f"{mode.title()}ing (minimum run until {_fmt(inp.ac_since + min_run)})", precool)
         if opposite_due:
             return build("off", f"Stopping {mode}: {zones_by_id[opposite_due[0].zone_id].name} now needs {opposite_due[0].mode}")

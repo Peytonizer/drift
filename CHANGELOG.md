@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Restart and handover safety, after a restart-heavy evening where the AC started six times in
+  30 minutes:
+  - The minimum-run hold only applies to a run Drift started. A run inherited across a restart,
+    or begun by a person, is never held, so the planner can stop it when it isn't needed.
+  - A restart is no longer treated as an AC outage. While the AC entity hasn't loaded yet Drift
+    waits, and when it first reports there is no "recently back" grace, so a person's change in
+    the first ten minutes is respected rather than resent. Real outages keep the grace.
+  - Once Drift's command has been seen to land, any later departure from it counts as a person,
+    even inside the three-minute allowance for a slow echo (which still covers a command in flight).
+  - Times in reasons ("minimum run until …") are local, not UTC.
+  - The saved state gains `run_is_ours` and `expected_mode`; saves from older versions load safely.
 - Slight excursions (within tolerance) are now left alone however long they last, provided
   the room comes back on its own within the look-ahead; previously only short ones were. On
   the first live evening Drift started the whole system to shave 0.3 °C off a room that was
