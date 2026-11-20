@@ -40,9 +40,12 @@ Then go to **Settings → Devices & services → Add integration → Drift**.
 | | Tier 2 zones | `climate.ac_main_bedroom` |
 | | Tier 3 zones | everything else |
 | | Constant zones | the zones marked C on the wall panel |
+| | Outdoor temperature sensor (optional) | a real observation, e.g. the nearest BoM station via the [Bureau of Meteorology](https://github.com/bremor/bureau_of_meteorology) integration |
 | Energy | Grid meter power (whole house) | e.g. a SolarEdge meter `…_ac_power` (import negative) |
 | | Meter phase the AC is on | e.g. `…_ac_power_b` |
 | | Automations to pause | any existing AC automations it replaces |
+
+A weather entity's "current" temperature is usually a model estimate and can be several degrees out (a rainy evening is the classic case). With an outdoor sensor set, Drift uses its reading while it has reported in the last 90 minutes, carries the model's error into the forecast and fades it out over three hours, and falls back to the weather entity if the sensor goes quiet. `sensor.drift_status` → `outdoor_source` shows which one is in use.
 
 It starts **disabled (shadow mode)**. Watch `sensor.drift_status` → `reason`, then turn on `switch.drift_control_enabled`. Switching it on turns the listed automations off, and switching it off turns them back on.
 

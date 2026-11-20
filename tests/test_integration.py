@@ -328,3 +328,48 @@ async def test_constant_zones_are_never_closed_when_running(hass, freezer):
     assert "climate.ac_office" in closed  # an ordinary tier 3 zone is closed
     assert "climate.ac_lounge" not in closed and "climate.ac_living" not in closed
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_outdoor_sensor_overrides_model_and_falls_back_when_stale(hass, freezer):
+    freezer.move_to("2026-11-20 17:00:00+11:00")
+    await _setup_states(hass, nursery=24.4, outdoor=24.3)
+    hass.states.async_set("sensor.bom_station_temp", "19.0", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    async_mock_service(hass, "automation", "turn_off")
+    entry = await _config_flow(hass)
+
+    r = await hass.config_entries.options.async_init(entry.entry_id)
+    r = await hass.config_entries.options.async_configure(r["flow_id"], {"next_step_id": "zones"})
+    r = await hass.config_entries.options.async_configure(
+        r["flow_id"],
+        {
+            "tier1_zone": "climate.ac_nursery",
+            "tier1_sensor": "sensor.nursery_temperature",
+            "outdoor_sensor": "sensor.bom_station_temp",
+            "tier2_zones": ["climate.ac_master"],
+            "tier3_zones": ["climate.ac_office", "climate.ac_lounge", "climate.ac_living"],
+            "constant_zones": ["climate.ac_lounge", "climate.ac_living"],
+        },
+    )
+    await hass.async_block_till_done()
+    entry = hass.config_entries.async_get_entry(entry.entry_id)
+    ctrl = entry.runtime_data
+    now = dt_util.now()
+    ctrl._read_weather()
+    assert ctrl.outdoor == 19.0
+    assert ctrl.outdoor_source == "sensor.bom_station_temp"
+
+    # the 5.3°C model error is carried into the next hours and gone by 3 h
+    raw = {p.when: p.temp for p in ctrl.forecast}
+    adj = {p.when: p.temp for p in ctrl.planning_forecast(now)}
+    first, *_ = sorted(raw)
+    assert adj[first] < raw[first] - 2
+    late = [w for w in raw if (w - now).total_seconds() >= 3 * 3600]
+    assert late and all(adj[w] == raw[w] for w in late)
+
+    # observation goes quiet: fall back to the weather entity rather than trust a stale reading
+    freezer.tick(timedelta(minutes=91))
+    ctrl._read_weather()
+    assert ctrl.outdoor == 24.3
+    assert ctrl.outdoor_source == "weather.home"
+    assert ctrl.planning_forecast(dt_util.now()) is ctrl.forecast
+    await hass.config_entries.async_unload(entry.entry_id)

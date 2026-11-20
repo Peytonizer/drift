@@ -60,6 +60,7 @@ class StatusSensor(DriftEntity, SensorEntity):
             "in_window": c.in_window(dt_util.now()),
             "active_rules": c.active_rules(dt_util.now()),
             "outdoor_now": c.outdoor,
+            "outdoor_source": c.outdoor_source,
             "zones": {
                 z.name: {
                     "tier": z.tier,

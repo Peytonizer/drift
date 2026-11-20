@@ -19,7 +19,8 @@
           "tier1_sensor": "Tier 1 room temperature sensor (optional, more accurate than the zone sensor)",
           "tier2_zones": "Tier 2 zones",
           "tier3_zones": "Tier 3 zones",
-          "constant_zones": "Constant zones (the AC's pressure-relief zones, marked C on the wall panel): never switched off"
+          "constant_zones": "Constant zones (the AC's pressure-relief zones, marked C on the wall panel): never switched off",
+          "outdoor_sensor": "Outdoor temperature sensor (optional; a real reading, e.g. the nearest BoM station, used instead of the weather service's estimate)"
         }
       },
       "energy": {
@@ -58,7 +59,8 @@
           "tier1_sensor": "Tier 1 room temperature sensor",
           "tier2_zones": "Tier 2 zones",
           "tier3_zones": "Tier 3 zones",
-          "constant_zones": "Constant zones (the AC's pressure-relief zones, marked C on the wall panel): never switched off"
+          "constant_zones": "Constant zones (the AC's pressure-relief zones, marked C on the wall panel): never switched off",
+          "outdoor_sensor": "Outdoor temperature sensor"
         }
       },
       "energy": {

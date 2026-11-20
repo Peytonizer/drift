@@ -14,6 +14,13 @@ CONF_MYZONE_SELECT = "myzone_select"
 CONF_WEATHER = "weather"
 CONF_TIER1_ZONE = "tier1_zone"
 CONF_TIER1_SENSOR = "tier1_sensor"
+CONF_OUTDOOR_SENSOR = "outdoor_sensor"
+# A real observation older than this is ignored in favour of the weather entity's model value.
+# BoM AWS stations report every 30 min (sometimes 10), so 90 min allows two missed reports.
+OUTDOOR_SENSOR_MAX_AGE_MIN = 90
+# How long a model-vs-observation gap is carried into the forecast. Weather model errors are
+# mostly about timing (a front or rain band early or late), which rarely persists past a few hours.
+FORECAST_BIAS_FADE_H = 3.0
 CONF_TIER2_ZONES = "tier2_zones"
 CONF_TIER3_ZONES = "tier3_zones"
 CONF_CONSTANT_ZONES = "constant_zones"

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Optional outdoor temperature sensor. A real observation replaces the weather entity's
+  model estimate while it's fresh (reported within 90 min), and the gap between them is
+  carried into the forecast, fading out over three hours, because a model running warm now
+  is usually warm for the next few hours too. Falls back to the weather entity when the
+  sensor goes quiet. Prompted by met.no reading 24 °C on a rainy 19 °C evening.
 - Forecast-aware planner: projects each zone six hours ahead with the AC off and starts at
   the latest moment that keeps it in band, so rooms are left to cool or warm naturally when
   the forecast allows. Small, short excursions (≤ 0.3 °C) are tolerated rather than starting

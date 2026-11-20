@@ -41,8 +41,11 @@ from .const import (
     CONF_RECOVERY_MAX,
     CONF_RECOVERY_MINUTES,
     CONF_START_LAG,
+    CONF_OUTDOOR_SENSOR,
     CONF_TIER1_SENSOR,
     CONF_TIER1_ZONE,
+    FORECAST_BIAS_FADE_H,
+    OUTDOOR_SENSOR_MAX_AGE_MIN,
     CONF_TIER2_ZONES,
     CONF_TIER3_ZONES,
     CONF_CONSTANT_ZONES,
@@ -125,6 +128,8 @@ class DriftController:
         self.forecast: list[ForecastPoint] = []
         self._forecast_at: datetime | None = None
         self.outdoor: float | None = None
+        self.outdoor_source: str | None = None
+        self.outdoor_model: float | None = None
         self.cloud: float | None = None
         self.ac_mode_actual = "off"
         self.ac_since: datetime | None = None
@@ -580,8 +585,37 @@ class DriftController:
             return
         t = st.attributes.get("temperature")
         self.outdoor = float(t) if t is not None else None
+        self.outdoor_model = self.outdoor
+        self.outdoor_source = self.cfg[CONF_WEATHER] if self.outdoor is not None else None
+        # The weather entity's "current" temperature is a model value (met.no can sit 5°C off on a
+        # rainy evening). A real observation wins while it is fresh; last_reported advances on every
+        # poll even when the value is unchanged, so an unchanged reading doesn't look stale.
+        sid = self.cfg.get(CONF_OUTDOOR_SENSOR)
+        if sid:
+            obs = self.hass.states.get(sid)
+            v = _f(obs)
+            if v is not None and dt_util.utcnow() - obs.last_reported <= timedelta(minutes=OUTDOOR_SENSOR_MAX_AGE_MIN):
+                self.outdoor = v
+                self.outdoor_source = sid
         c = st.attributes.get("cloud_coverage")
         self.cloud = float(c) if c is not None else None
+
+    def planning_forecast(self, now: datetime) -> list[ForecastPoint]:
+        """The forecast, nudged toward the real observation.
+
+        If the observation says the model is running warm (or cool) right now, the next few hours
+        probably are too. The gap is carried forward and faded out linearly over
+        FORECAST_BIAS_FADE_H, after which the raw forecast is trusted again.
+        """
+        if self.outdoor_source == self.cfg[CONF_WEATHER] or self.outdoor is None or self.outdoor_model is None:
+            return self.forecast
+        bias = self.outdoor - self.outdoor_model
+        out = []
+        for p in self.forecast:
+            h = (p.when - now).total_seconds() / 3600
+            w = max(0.0, 1 - max(h, 0) / FORECAST_BIAS_FADE_H)
+            out.append(ForecastPoint(p.when, p.temp + bias * w, p.cloud))
+        return out
 
     async def _async_refresh_forecast(self, now: datetime) -> None:
         if self._forecast_at and now - self._forecast_at < timedelta(minutes=30) and self.forecast:
@@ -782,7 +816,7 @@ class DriftController:
                     ZoneInput(z.climate_id, z.name, z.tier, self.zone_temp(z), self.models[z.climate_id], z.constant)
                     for z in self.zones
                 ],
-                forecast=self.forecast,
+                forecast=self.planning_forecast(now),
                 outdoor_now=self.outdoor,
                 cloud_now=self.cloud,
                 lat=self.hass.config.latitude,
@@ -975,7 +1009,7 @@ class DriftController:
         out = []
         for h in range(0, 13):
             w = now + timedelta(hours=h)
-            inp = PlanInput(now, [], self.forecast, self.outdoor, self.cloud, 0, 0, self.band_by_id, now, "off", None, None)
+            inp = PlanInput(now, [], self.planning_forecast(now), self.outdoor, self.cloud, 0, 0, self.band_by_id, now, "off", None, None)
             t, _ = outdoor_at(inp, w)
             out.append({"time": w.strftime("%H:%M"), "outdoor": round(t, 1)})
         return out

@@ -46,6 +46,7 @@ from .const import (
     CONF_RECOVERY_MINUTES,
     CONF_START_LAG,
     CONF_TIER1_SENSOR,
+    CONF_OUTDOOR_SENSOR,
     CONF_TIER1_ZONE,
     CONF_TIER2_ZONES,
     CONF_TIER3_ZONES,
@@ -91,6 +92,7 @@ def zones_schema(d: dict) -> vol.Schema:
         {
             vol.Required(CONF_TIER1_ZONE, default=d.get(CONF_TIER1_ZONE, vol.UNDEFINED)): _ent("climate"),
             _opt(CONF_TIER1_SENSOR, d): _ent("sensor", device_class="temperature"),
+            _opt(CONF_OUTDOOR_SENSOR, d): _ent("sensor", device_class="temperature"),
             vol.Optional(CONF_TIER2_ZONES, default=d.get(CONF_TIER2_ZONES, [])): _ent("climate", multiple=True),
             vol.Optional(CONF_TIER3_ZONES, default=d.get(CONF_TIER3_ZONES, [])): _ent("climate", multiple=True),
             vol.Optional(CONF_CONSTANT_ZONES, default=d.get(CONF_CONSTANT_ZONES, [])): _ent("climate", multiple=True),
@@ -226,8 +228,10 @@ class DriftOptionsFlow(OptionsFlow):
     async def async_step_zones(self, user_input: dict | None = None) -> ConfigFlowResult:
         if user_input is not None:
             self._opts.update(user_input)
-            if CONF_TIER1_SENSOR not in user_input:
-                self._opts[CONF_TIER1_SENSOR] = None
+            # a cleared optional selector is omitted, so clear the stored value explicitly
+            for k in (CONF_TIER1_SENSOR, CONF_OUTDOOR_SENSOR):
+                if k not in user_input:
+                    self._opts[k] = None
             return self._save()
         return self.async_show_form(step_id="zones", data_schema=zones_schema(self._cur))
 
