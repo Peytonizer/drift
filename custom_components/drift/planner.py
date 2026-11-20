@@ -13,7 +13,8 @@ Every control cycle the planner:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable
 
@@ -61,6 +62,12 @@ class Settings:
     precool_min_surplus_w: float = 2500
     allow_cooling: bool = True
     allow_heating: bool = True
+    # Forecast-aware target (IDEAS 14): aim for the shallowest target from which the room's own
+    # drift stays in band for coast_horizon_h, instead of always cool_depth below the band edge.
+    coast_target: bool = True
+    target_margin_c: float = 0.5
+    coast_horizon_h: float = 12.0
+    coast_min_samples: int = 50
 
 
 @dataclass
@@ -84,12 +91,23 @@ class PlanInput:
     # by a person): the minimum-run hold exists to protect the compressor from Drift's own
     # short-cycling, not to keep a run nobody here asked for.
     run_is_ours: bool = True
+    # The AC's own limits for a sent setpoint (it steps in whole degrees within them)
+    min_setpoint: float = 16.0
+    max_setpoint: float = 32.0
 
 
 @dataclass
 class ZoneCommand:
     on: bool
+    # Whole degrees: what is sent to the AC. Rounded the stronger way (cool floors, heat ceils) so
+    # the AC never stops by itself before Drift does.
     setpoint: float
+    # Where Drift itself stops the run, at the sensor's 0.1 °C precision.
+    target: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.target is None:
+            self.target = self.setpoint
 
 
 @dataclass
@@ -252,8 +270,7 @@ def _hard_violation(inp: PlanInput, zone: ZoneInput, mode: str) -> bool:
     return zone.temp > hi + m if mode == "cool" else zone.temp < lo - m
 
 
-def _target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
-    s = inp.settings
+def _band_for_target(inp: PlanInput, zone: ZoneInput, precool: bool) -> tuple[float, float]:
     lo, hi = inp.band_fn(zone.zone_id, inp.now)
     # aim for the band that applies over the next couple of hours, so pre-cooling
     # before the overnight window targets the overnight band, not the day band
@@ -262,10 +279,85 @@ def _target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
     lo, hi = max(lo, lo2), min(hi, hi2)
     if lo > hi:
         lo, hi = lo2, hi2
+    return lo, hi
+
+
+def _depth_target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
+    """The fixed-depth target: a set distance inside the band edge, whatever the forecast."""
+    s = inp.settings
+    lo, hi = _band_for_target(inp, zone, precool)
     if mode == "cool":
         depth = s.precool_depth if precool else s.cool_depth
         return round(max(lo + 0.5, hi - depth), 1)
     return round(min(hi - 0.5, lo + s.heat_depth), 1)
+
+
+def coast_target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool = False) -> float | None:
+    """The shallowest target from which the room's own drift stays in band for the next hours.
+
+    A warm night needs the deep target (today's value); a cold night lets the room fall by itself,
+    so cooling it as deep as cool_depth would only send it below its band and need heat. Returns
+    None when it can't say (no temperature), so the caller falls back to the fixed depth.
+    """
+    s = inp.settings
+    if zone.temp is None:
+        return None
+    lo, hi = _band_for_target(inp, zone, precool)
+    deepest = _depth_target(inp, zone, mode, precool)
+    if mode == "cool":
+        shallowest = max(deepest, round(hi - s.target_margin_c, 1))
+    else:
+        shallowest = min(deepest, round(lo + s.target_margin_c, 1))
+    n = int(round(abs(shallowest - deepest) * 10))
+    sign = -1 if mode == "cool" else 1
+    candidates = [round(shallowest + sign * i * 0.1, 1) for i in range(n + 1)]  # shallow -> deep
+
+    sim = replace(inp, settings=replace(s, horizon_h=s.coast_horizon_h))
+    own_breach: list[bool] = []  # would still end up on the side this run is meant to fix
+    opposite_breach: list[bool] = []  # would overshoot to the other side of the band
+    for t in candidates:
+        own = opp = False
+        for when, v in project_passive(sim, zone, start_temp=t):
+            lo_w, hi_w = inp.band_fn(zone.zone_id, when)
+            above = v > hi_w + s.tolerance_c
+            below = v < lo_w - s.tolerance_c
+            own = own or (above if mode == "cool" else below)
+            opp = opp or (below if mode == "cool" else above)
+        own_breach.append(own)
+        opposite_breach.append(opp)
+
+    for t, a, b in zip(candidates, own_breach, opposite_breach):
+        if not a and not b:
+            return round(t, 1)
+    if all(opposite_breach):
+        return round(candidates[0], 1)  # nothing is clean: favour the shallow one
+    # No clean candidate: avoid the opposite mode where possible, even at the cost of another top-up
+    for t, b in reversed(list(zip(candidates, opposite_breach))):
+        if not b:
+            return round(t, 1)
+    return round(candidates[0], 1)  # unreachable; keeps the type checker honest
+
+
+def _target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
+    s = inp.settings
+    if (
+        s.coast_target
+        and not precool
+        and zone.tier <= 2
+        and zone.temp is not None
+        and zone.model.n_passive >= s.coast_min_samples
+    ):
+        t = coast_target(inp, zone, mode, precool)
+        if t is not None:
+            return t
+    return _depth_target(inp, zone, mode, precool)
+
+
+def _setpoint_for(inp: PlanInput, mode: str, target: float) -> float:
+    """The whole-degree setpoint to send: the stronger way, so the AC never stops before Drift."""
+    # 1e-6 absorbs float error: a target of 23.0 must stay 23, not become 22 or 24
+    sp = math.floor(target + 1e-6) if mode == "cool" else math.ceil(target - 1e-6)
+    return float(min(max(sp, inp.min_setpoint), inp.max_setpoint))
 
 
 def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) -> tuple[dict[str, ZoneCommand], str | None]:
@@ -285,7 +377,7 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
             on = z.temp > target if mode == "cool" else z.temp < target
         else:  # tier 3: piggyback only when drifting towards the edge of its band
             on = z.temp > hi - 1.0 if mode == "cool" else z.temp < lo + 1.0
-        cmds[z.zone_id] = ZoneCommand(on, target)
+        cmds[z.zone_id] = ZoneCommand(on, _setpoint_for(inp, mode, target), target)
     # protect the ductwork: keep a minimum number of zones open
     open_count = sum(1 for c in cmds.values() if c.on)
     if open_count < s.min_open_zones:
@@ -300,7 +392,7 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
         key=lambda z: z.tier,
     )
     for z in candidates:
-        tgt = cmds[z.zone_id].setpoint
+        tgt = cmds[z.zone_id].target
         if (mode == "cool" and z.temp > tgt) or (mode == "heat" and z.temp < tgt):
             driver = z.zone_id
             break

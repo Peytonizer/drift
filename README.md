@@ -71,7 +71,7 @@ It starts **disabled (shadow mode)**. Watch `sensor.drift_status` → `reason`, 
 | 2.5 | 16–20 °C | cool to 18.5, heat to 17.5 |
 | 3.5 | below 16 °C (13–16 here) | cool to 14.5, heat to 14.5 |
 
-The defaults follow Love to Dream's Australian ratings. Brands differ, so edit the chart to match your sleepwear. The chart range is the band itself; the cool and heat depths (Tuning) decide where the AC aims inside it, so the room has the full range to drift in.
+The defaults follow Love to Dream's Australian ratings. Brands differ, so edit the chart to match your sleepwear. The chart range is the band itself; the cool and heat depths (Tuning) set the deepest the AC aims inside it. For bedrooms with a learned model Drift aims shallower when the forecast says the night will do the rest, so the room has the full range to drift in. The AC steps in whole degrees, so Drift sends a whole number and ends each run itself when the room reaches its own 0.1 °C target.
 
 ## Entities
 

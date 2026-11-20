@@ -153,7 +153,7 @@ def test_zone_priorities_when_cooling():
     assert d.action == "cool"
     assert d.myzone == "nursery"
     c = d.zone_commands
-    assert c["nursery"].on and c["nursery"].setpoint == 23.5
+    assert c["nursery"].on and c["nursery"].target == 23.5 and c["nursery"].setpoint == 23  # sent as a whole degree
     assert c["master"].on  # above its target 23.5
     # tier-3 at 24.0 is well inside 17–27: only opened to satisfy min-open-zones (3)
     assert sum(1 for x in c.values() if x.on) == 3
@@ -164,7 +164,7 @@ def test_winter_heating_night():
     f = [ForecastPoint(now + timedelta(hours=h), 5 - h * 0.6, 50) for h in range(8)]
     d = plan(mk(now, zones(21.1, 20.0, others=18), f, 5))
     assert d.action == "heat", d.reason
-    assert d.zone_commands["nursery"].setpoint == 22.5
+    assert d.zone_commands["nursery"].target == 22.5 and d.zone_commands["nursery"].setpoint == 23  # heat rounds up
 
 
 def test_solar_precool_on_hot_afternoon():
@@ -321,7 +321,8 @@ def test_cools_when_slightly_over_but_warm_outside():
     inp.band_fn = band_tog10
     d = plan(inp)
     assert d.action == "cool", d.reason
-    assert d.zone_commands["nursery"].setpoint == 22.5  # chart edge 24 - cool depth 1.5
+    assert d.zone_commands["nursery"].target == 22.5  # chart edge 24 - cool depth 1.5
+    assert d.zone_commands["nursery"].setpoint == 22
 
 
 def test_too_far_over_to_wait_even_if_it_would_recover():
@@ -474,7 +475,8 @@ def test_schedule_rule_preconditions_before_it_starts():
     assert at(7, 0).action == "off"
     d = at(7, 30)
     assert d.action == "cool", d.reason
-    assert d.zone_commands["office"].setpoint == 23.5  # 25 - cool depth, the rule's band ahead
+    assert d.zone_commands["office"].target == 23.5  # 25 - cool depth, the rule's band ahead
+    assert d.zone_commands["office"].setpoint == 23
 
 
 def test_merge_outdoor_history_prefers_observations_and_borrows_cloud():
@@ -534,3 +536,96 @@ def test_exactly_at_tolerance_is_within_it():
     inp.band_fn = band_tog10
     d = plan(inp)
     assert d.action == "off", d.reason
+
+
+# ------------------------------------------------------------------ IDEAS 14: forecast-aware target
+import sc.planner as pl  # noqa: E402
+
+NIGHT = datetime(2026, 11, 20, 22, 0, tzinfo=AEDT)
+
+
+def _flat_band(zone_id, when):
+    return (20.0, 24.0)
+
+
+def _coast(temp, outdoor_rows, tier=1, n_passive=100, a=0.05, mode="cool", **kw):
+    f = [ForecastPoint(NIGHT + timedelta(hours=h), v, 100) for h, v in outdoor_rows]
+    zs = [ZoneInput("nursery", "Nursery", tier, temp, ZoneModel(a=a, b=0.0, c=0.0, n_passive=n_passive))]
+    inp = mk(NIGHT, zs, f, outdoor_rows[0][1], min_open_zones=1, **kw)
+    inp.band_fn = _flat_band
+    return inp, zs[0]
+
+
+def _breaches(inp, z, start, mode):
+    """(upper, lower) breach over the 12 h coast horizon, as the planner judges them."""
+    sim = pl.replace(inp, settings=pl.replace(inp.settings, horizon_h=12))
+    tol = inp.settings.tolerance_c
+    pts = [v for _, v in pl.project_passive(sim, z, start_temp=start)]
+    return any(v > 24 + tol for v in pts), any(v < 20 - tol for v in pts)
+
+
+def test_cold_night_aims_shallow():
+    inp, z = _coast(24.5, [(0, 8), (14, 8)])
+    assert pl._depth_target(inp, z, "cool", False) == 22.5
+    assert pl._target(inp, z, "cool", False) == 23.5  # the room would fall below its band: don't cool deep
+
+
+def test_hot_night_aims_deep():
+    inp, z = _coast(24.5, [(0, 30), (14, 30)])
+    assert pl._target(inp, z, "cool", False) == 22.5
+
+
+def test_mild_night_picks_the_shallowest_clean_target():
+    inp, z = _coast(24.5, [(0, 25.5), (14, 25.5)])
+    t = pl._target(inp, z, "cool", False)
+    assert 22.5 < t < 23.5
+    assert _breaches(inp, z, t, "cool") == (False, False)
+    assert _breaches(inp, z, round(t + 0.1, 1), "cool")[0]  # one step shallower would end over the top
+
+
+def test_heat_mirror():
+    inp, z = _coast(19.5, [(0, 21), (14, 21)])  # warming night: the room comes up by itself
+    assert pl._depth_target(inp, z, "heat", False) == 21.5
+    assert pl._target(inp, z, "heat", False) == 20.5
+    inp, z = _coast(19.5, [(0, 12), (14, 12)])  # freezing night: heat as deep as today
+    assert pl._target(inp, z, "heat", False) == 21.5
+    assert not _breaches(inp, z, 21.5, "heat")[0]  # and it never goes over the top
+
+
+def test_falls_back_to_the_fixed_depth():
+    cold = [(0, 8), (14, 8)]
+    inp, z = _coast(24.5, cold, n_passive=10)  # thin model
+    assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False) == 22.5
+    inp, z = _coast(24.5, cold, tier=3)
+    assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False)
+    inp, z = _coast(24.5, cold)
+    assert pl._target(inp, z, "cool", True) == pl._depth_target(inp, z, "cool", True)  # pre-cool
+    inp, z = _coast(24.5, cold, coast_target=False)
+    assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False)
+
+
+def test_conflict_avoids_the_opposite_mode_where_it_can():
+    # a hot spell then a hard cold snap: shallow targets breach the top early, deep ones the bottom late
+    f = [(0, 37), (2, 37), (2.02, 12), (16, 12)]
+    inp, z = _coast(24.5, f)
+    t = pl._target(inp, z, "cool", False)
+    assert t == 23.3
+    assert not _breaches(inp, z, t, "cool")[1]  # no overshoot to the cold side
+    assert _breaches(inp, z, 23.2, "cool")[1]  # but one step deeper would
+    assert _breaches(inp, z, t, "cool")[0]  # accepted: it may need one more top-up
+
+
+def test_setpoints_are_whole_degrees_and_stop_uses_the_target():
+    inp, z = _coast(24.5, [(0, 8), (14, 8)])
+    c = pl._zone_commands(inp, "cool", False, {"nursery"})[0]["nursery"]
+    assert c.target == 23.5 and c.setpoint == 23.0  # cool floors
+    inp, z = _coast(19.5, [(0, 12), (14, 12)])
+    c = pl._zone_commands(inp, "heat", False, {"nursery"})[0]["nursery"]
+    assert c.target == 21.5 and c.setpoint == 22.0  # heat rounds up
+    assert pl._setpoint_for(inp, "cool", 23.0) == 23.0  # an exact whole degree is kept
+    assert pl._setpoint_for(inp, "cool", 15.5) == 16.0  # clamped to the unit's range
+    inp.max_setpoint = 24
+    assert pl._setpoint_for(inp, "heat", 24.5) == 24.0
+    # a running cool run at a 23.5 target (23 sent): a room at 23.6 is satisfied
+    inp, z = _coast(23.6, [(0, 8), (14, 8)], ac_mode="cool", ac_since=NIGHT - timedelta(hours=1))
+    assert pl.plan(inp).action == "off"

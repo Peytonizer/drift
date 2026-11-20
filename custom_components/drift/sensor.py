@@ -67,7 +67,11 @@ class StatusSensor(DriftEntity, SensorEntity):
                     "temp": c.zone_temp(z),
                     "band": c.band(z, dt_util.now()),
                     "command": (
-                        {"on": d.zone_commands[z.climate_id].on, "setpoint": d.zone_commands[z.climate_id].setpoint}
+                        {
+                            "on": d.zone_commands[z.climate_id].on,
+                            "setpoint": d.zone_commands[z.climate_id].setpoint,
+                            "target": d.zone_commands[z.climate_id].target,
+                        }
                         if d and z.climate_id in d.zone_commands
                         else None
                     ),

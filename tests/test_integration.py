@@ -123,7 +123,7 @@ async def test_setup_shadow_mode_then_enable_cools_when_hot(hass: HomeAssistant,
     assert auto_off and auto_off[0].data["entity_id"] == ["automation.nursery_too_hot"]
     main_calls = [c for c in set_mode if c.data["entity_id"] == "climate.ac"]
     assert main_calls and main_calls[-1].data["hvac_mode"] == "cool"
-    assert any(c.data == {"entity_id": "climate.ac_nursery", "temperature": 23.5} for c in set_temp)
+    assert any(c.data == {"entity_id": "climate.ac_nursery", "temperature": 23.0} for c in set_temp)
     assert select and select[-1].data["option"] == "Nursery"
     st = hass.states.get("sensor.drift_status")
     assert st.state == "cooling", st.attributes["reason"]
@@ -605,4 +605,70 @@ async def test_ac_since_and_last_stop_are_local_time(hass, freezer):
     c = await _restart(hass, entry, saved_in_utc)
     assert c.last_stop.utcoffset() == timedelta(hours=11) and c.last_stop.hour == 18
     assert c.override_until.utcoffset() == timedelta(hours=11) and c.override_until.hour == 20
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def _enable_with_models(hass, freezer, forecast_temps, outdoor, trained=True):
+    """Hot-room set-up (hard limit, so Drift cools at once), with a chosen forecast and trained models."""
+    freezer.move_to("2026-01-15 21:00:00+11:00")
+    await _setup_states(hass, nursery=26.4, outdoor=outdoor, forecast_temps=forecast_temps)
+    for n, t in [("nursery", 26.4), ("master", 24.4), ("office", 24.4), ("lounge", 23.6), ("living", 23.7)]:
+        _zone(hass, n, t, setpoint=30)  # nothing already matches what Drift will send
+    set_mode = async_mock_service(hass, "climate", "set_hvac_mode")
+    set_temp = async_mock_service(hass, "climate", "set_temperature")
+    async_mock_service(hass, "automation", "turn_off")
+    entry = await _config_flow(hass)
+    async_mock_service(hass, "select", "select_option")
+    c = entry.runtime_data
+    if trained:
+        for m in c.models.values():
+            m.n_passive = 100
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.drift_control_enabled"}, blocking=True)
+    await hass.async_block_till_done()
+    return entry, c, set_mode, set_temp
+
+
+def _setpoints(set_temp, entity):
+    return [x.data["temperature"] for x in set_temp if x.data["entity_id"] == entity]
+
+
+async def test_whole_degree_setpoint_is_not_resent_each_cycle(hass, freezer):
+    entry, c, set_mode, set_temp = await _enable_with_models(hass, freezer, [31, 30, 29, 28, 27, 26, 25, 24], 31, trained=False)
+    assert _setpoints(set_temp, "climate.ac_nursery") == [23.0]  # 23.5 target, sent as a whole degree
+    assert all(float(v).is_integer() for x in set_temp for v in [x.data["temperature"]])
+    # the AC applies exactly what it was sent
+    for x in set_temp:
+        st = hass.states.get(x.data["entity_id"])
+        hass.states.async_set(x.data["entity_id"], st.state, {**st.attributes, "temperature": x.data["temperature"]})
+    hass.states.async_set("climate.ac", "cool", {**hass.states.get("climate.ac").attributes, "temperature": 23.0})
+    sent = len(set_temp)
+    for _ in range(3):
+        freezer.tick(timedelta(minutes=5))
+        await c._async_sample(dt_util.now())
+        await c._async_control(dt_util.now())
+    assert len(set_temp) == sent, [(x.data["entity_id"], x.data["temperature"]) for x in set_temp[sent:]]
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_cold_night_cool_run_uses_the_shallow_setpoint_and_stops_there(hass, freezer):
+    entry, c, set_mode, set_temp = await _enable_with_models(hass, freezer, [10, 9, 9, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8], 10)
+    # fixed depth would be 25 - 1.5 = 23.5 -> 23; the cold night lets it stop at 24.5 -> 24
+    assert _setpoints(set_temp, "climate.ac_nursery") == [24.0]
+    assert _setpoints(set_temp, "climate.ac") == [24.0]
+    assert c.decision.zone_commands["climate.ac_nursery"].target == 24.5
+
+    # the AC reports it, runs the minimum, and the room reaches the shallow target
+    hass.states.async_set("climate.ac", "cool", {"current_temperature": 26, "temperature": 24, "hvac_modes": ["off", "cool", "heat"]})
+    freezer.tick(timedelta(seconds=60))
+    await c._async_sample(dt_util.now())
+    assert c.pending is None
+    freezer.tick(timedelta(minutes=31))
+    for n in ("nursery", "master", "office", "lounge", "living"):
+        st = hass.states.get(f"climate.ac_{n}")
+        hass.states.async_set(f"climate.ac_{n}", st.state, {**st.attributes, "current_temperature": 24.4})
+    hass.states.async_set("sensor.nursery_temperature", "24.4", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    await c._async_sample(dt_util.now())
+    await c._async_control(dt_util.now())
+    st = hass.states.get("sensor.drift_status")
+    assert "reached target" in st.attributes["reason"], st.attributes["reason"]
     await hass.config_entries.async_unload(entry.entry_id)

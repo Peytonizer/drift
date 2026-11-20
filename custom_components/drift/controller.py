@@ -844,6 +844,18 @@ class DriftController:
             allow_heating=bool(c[CONF_ALLOW_HEATING]),
         )
 
+    def _setpoint_limits(self) -> dict[str, float]:
+        """The main unit's own setpoint range, so a sent setpoint is one it accepts."""
+        st = self.hass.states.get(self.cfg[CONF_MAIN_CLIMATE])
+        out: dict[str, float] = {}
+        if st:
+            for key, field in (("min_temp", "min_setpoint"), ("max_temp", "max_setpoint")):
+                try:
+                    out[field] = float(st.attributes[key])
+                except (KeyError, TypeError, ValueError):
+                    pass
+        return out
+
     async def _async_control(self, now: datetime) -> None:
         now = dt_util.as_local(now)
         try:
@@ -876,6 +888,7 @@ class DriftController:
                 solar_surplus_w=surplus,
                 settings=self._settings(),
                 run_is_ours=self.run_is_ours,
+                **self._setpoint_limits(),
             )
             decision = plan(inp)
             self.decision = decision

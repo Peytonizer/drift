@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Forecast-aware target. When Drift runs the AC for a bedroom (tier 1 or 2) it now aims for the
+  shallowest target from which the room's own drift stays in its band for the next 12 hours,
+  instead of always cooling (or heating) a fixed depth inside the band edge. On a warm night
+  that is the same deep target as before; on a cold night it is shallower, so the room is not
+  cooled and then left to fall below its band and need heat. Heat is the mirror. When no target
+  is clean it avoids the opposite mode where it can. Rooms with fewer than 50 learned samples,
+  tier 3 zones and solar pre-cool keep the fixed depth.
+- Whole-degree setpoints. The AC steps in whole degrees, so Drift now sends a whole number (cool
+  rounds down, heat up, within the unit's own range) and keeps its own 0.1 °C stop temperature,
+  checking each room against that every cycle. This also stops a fractional value being resent
+  to the AC every cycle. `sensor.drift_status` zone commands now include both `setpoint` and `target`.
 - Restart and handover safety, after a restart-heavy evening where the AC started six times in
   30 minutes:
   - The minimum-run hold only applies to a run Drift started. A run inherited across a restart,
