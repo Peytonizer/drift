@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import async_mock_service
+from pytest_homeassistant_custom_component.common import async_fire_time_changed, async_mock_service
 
 DOMAIN = "drift"
 
@@ -372,4 +372,45 @@ async def test_outdoor_sensor_overrides_model_and_falls_back_when_stale(hass, fr
     assert ctrl.outdoor == 24.3
     assert ctrl.outdoor_source == "weather.home"
     assert ctrl.planning_forecast(dt_util.now()) is ctrl.forecast
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_manual_pause_and_last_stop_survive_a_reload(hass, freezer):
+    """2026-11-20: a restart and an options reload wiped the pause and Drift restarted the AC."""
+    freezer.move_to("2026-11-20 17:10:00+11:00")
+    await _setup_states(hass, nursery=26.4, outdoor=31, forecast_temps=[31, 30, 29, 28, 27, 26, 25, 24])
+    set_mode = async_mock_service(hass, "climate", "set_hvac_mode")
+    async_mock_service(hass, "climate", "set_temperature")
+    async_mock_service(hass, "automation", "turn_off")
+    entry = await _config_flow(hass)
+    async_mock_service(hass, "select", "select_option")
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.drift_control_enabled"}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.drift_status").state == "cooling"
+    hass.states.async_set("climate.ac", "cool", {"current_temperature": 26.4, "temperature": 22, "hvac_modes": ["off", "cool"]})
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=2))
+    async_fire_time_changed(hass)  # the per-minute check sees the command landed
+    await hass.async_block_till_done()
+    assert entry.runtime_data.pending is None
+
+    # someone stops it at the panel
+    freezer.tick(timedelta(minutes=6))
+    hass.states.async_set("climate.ac", "off", {"current_temperature": 26.3, "temperature": 22, "hvac_modes": ["off", "cool"]})
+    await hass.async_block_till_done()
+    await entry.runtime_data._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.drift_status").state == "manual_override"
+    until = entry.runtime_data.override_until
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    c = entry.runtime_data
+    assert c.override_until == until
+    assert c.last_stop is not None
+    set_mode.clear()
+    await c._async_control(dt_util.now() + timedelta(minutes=1))
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.drift_status").state == "manual_override"
+    assert not [x for x in set_mode if x.data["entity_id"] == "climate.ac"]
     await hass.config_entries.async_unload(entry.entry_id)

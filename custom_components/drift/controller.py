@@ -207,6 +207,12 @@ class DriftController:
         self.ac_mode_actual = main.state if main and main.state in ACTIVE_MODES else "off"
         if self.ac_mode_actual != "off":
             self.ac_since = main.last_changed
+        when = lambda k: dt_util.parse_datetime(data[k]) if data.get(k) else None  # noqa: E731
+        self.override_until = when("override_until")
+        self.last_stop = when("last_stop")
+        if data.get("ac_mode") == self.ac_mode_actual and when("ac_since"):
+            # still in the run we saved: keep its true start for the minimum-run guard
+            self.ac_since = when("ac_since")
         self.expected_mode = self.ac_mode_actual
         if main is None or main.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             self.ac_unavailable_since = dt_util.now()
@@ -378,6 +384,12 @@ class DriftController:
                 "tog": self.tog,
                 "notified_date": self._notified_date,
                 "bootstrap": self.bootstrap_info,
+                # Kept across restarts and reloads: losing them let Drift undo a manual stop and
+                # restart the compressor minutes after it last stopped.
+                "override_until": self.override_until.isoformat() if self.override_until else None,
+                "last_stop": self.last_stop.isoformat() if self.last_stop else None,
+                "ac_since": self.ac_since.isoformat() if self.ac_since else None,
+                "ac_mode": self.ac_mode_actual,
             }
         )
 
@@ -671,6 +683,7 @@ class DriftController:
         if mode != self.ac_mode_actual:
             if mode == "off":
                 self.last_stop = now
+                self.hass.async_create_task(self._async_save())
                 self.running_precool = False
                 self.ac_power.mark("stop", now)
             else:
@@ -861,6 +874,7 @@ class DriftController:
                     self.override_until = now + timedelta(minutes=int(self.cfg[CONF_OVERRIDE_MINUTES]))
                     self.expected_mode = None
                     _LOGGER.info("Manual AC change detected; pausing until %s", self.override_until)
+                    await self._async_save()
 
             if not self.enabled:
                 self.status = "disabled"
