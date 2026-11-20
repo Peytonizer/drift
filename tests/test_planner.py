@@ -524,3 +524,13 @@ def test_slight_long_undershoot_is_left_to_warm_back_on_its_own():
     under = [t for w, t in d.predictions["nursery"] if t < 20]
     assert len(under) * inp.settings.step_min > 60, "scenario must be a long undershoot"
     assert d.action == "off", d.reason
+
+
+def test_exactly_at_tolerance_is_within_it():
+    now = datetime(2026, 11, 20, 17, 40, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=h), 20.5 - h * 0.4, 100) for h in range(8)]
+    zs = [ZoneInput("nursery", "Nursery", 1, 24.3, ZoneModel(a=0.025, c=0.0))]
+    inp = mk(now, zs, f, 20.7, min_open_zones=1)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    assert d.action == "off", d.reason

@@ -172,7 +172,9 @@ def _episodes(inp: PlanInput, zone: ZoneInput, traj: list[tuple[datetime, float]
     cur: dict | None = None
     for when, temp in traj:
         lo, hi = inp.band_fn(zone.zone_id, when)
-        excess = (temp - hi) if mode == "cool" else (lo - temp)
+        # rounded: sensors report to 0.1 °C, and 24.3 - 24 is 0.30000000000000071 in floats,
+        # which put an exactly-at-tolerance room over the line
+        excess = round((temp - hi) if mode == "cool" else (lo - temp), 2)
         if excess > 0:
             if cur is None:
                 cur = {"start": when, "points": [], "end": None}
