@@ -209,7 +209,9 @@ def test_fewer_starts_than_threshold_automation():
                 rate -= truth.cool_rate
             temp += rate * 5 / 60
             lo, hi = band_fn_factory()("nursery", t)
-            if not lo <= temp <= hi:
+            # slight excursions (within tolerance) are left alone by design, so count real ones
+            tol = Settings().tolerance_c
+            if not lo - tol <= temp <= hi + tol:
                 out_min += 5
             t += timedelta(minutes=5)
         return starts, out_min
@@ -487,3 +489,38 @@ def test_merge_outdoor_history_prefers_observations_and_borrows_cloud():
     assert since == (t0 + timedelta(hours=4, minutes=5)).isoformat()
     assert [p[1] for p in merged] == [25.0] * 5 + [19.0, 18.5]  # model values only before the first observation
     assert merged[5][2] == 84.0 and merged[6][2] == 87.0
+
+
+# ---- slight but long excursions (2026-11-20: 24.3 °C at 17:22, back under 24 by about 20:00)
+def test_slight_long_overshoot_at_bedtime_is_left_to_come_back_on_its_own():
+    now = datetime(2026, 11, 20, 17, 10, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=h), 20.5 - h * 0.4, 100) for h in range(8)]
+    zs = [ZoneInput("nursery", "Nursery", 1, 24.28, ZoneModel(a=0.025, c=0.0))]
+    inp = mk(now, zs, f, 20.7, min_open_zones=1)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    over = [t for w, t in d.predictions["nursery"] if t > 24]
+    assert len(over) * inp.settings.step_min > 60, "scenario must be a long overshoot"
+    assert d.action == "off", d.reason
+
+
+def test_slight_overshoot_that_never_comes_back_is_still_cooled():
+    now = datetime(2026, 1, 15, 17, 10, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=h), 27, 10) for h in range(8)]
+    zs = [ZoneInput("nursery", "Nursery", 1, 24.2, ZoneModel(a=0.02, c=0.0))]
+    inp = mk(now, zs, f, 27, min_open_zones=1)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    assert d.action == "cool", d.reason
+
+
+def test_slight_long_undershoot_is_left_to_warm_back_on_its_own():
+    now = datetime(2026, 9, 10, 22, 0, tzinfo=AEDT)
+    f = [ForecastPoint(now + timedelta(hours=h), 22, 100) for h in range(8)]
+    zs = [ZoneInput("nursery", "Nursery", 1, 19.75, ZoneModel(a=0.05, b=0.0, c=0.0))]
+    inp = mk(now, zs, f, 22, min_open_zones=1, allow_heating=True)
+    inp.band_fn = band_tog10
+    d = plan(inp)
+    under = [t for w, t in d.predictions["nursery"] if t < 20]
+    assert len(under) * inp.settings.step_min > 60, "scenario must be a long undershoot"
+    assert d.action == "off", d.reason

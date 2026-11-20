@@ -193,7 +193,8 @@ def find_need(
     """Latest-start analysis for cooling and heating, one need per out-of-band episode.
 
     Two kinds of excursion are left alone:
-    * small, short ones anywhere in the horizon (tolerance), and
+    * small ones anywhere in the horizon (within tolerance): short ones always, and long
+      ones as long as the room is back in band before the horizon ends, and
     * a room that is already over (or under) its band by a little, when the forecast has
       it back in band soon on its own (natural recovery). Recovery only applies to the
       episode the room is in now: a future breach is still planned against, so the room
@@ -215,6 +216,13 @@ def find_need(
             minutes_over = len(pts) * s.step_min
             deg_min = sum(e for _, e in pts) * s.step_min
             if peak <= s.tolerance_c and (minutes_over <= s.tolerance_minutes or deg_min <= s.tolerance_c * 30):
+                continue
+            # A slight excursion is tolerated however long it lasts, as long as the room comes
+            # back on its own within the horizon. Starting the whole ducted system to shave
+            # 0.3 °C off a room that is already drifting the right way costs more than it buys.
+            if peak <= s.tolerance_c and ep["end"] is not None:
+                if ep["start"] <= inp.now and recoveries is not None:
+                    recoveries.append(Recovery(zone.zone_id, mode, pts[0][1], ep["end"]))
                 continue
             if (
                 ep["start"] <= inp.now

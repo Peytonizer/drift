@@ -7,7 +7,7 @@ Status: unreleased. Installed and running in shadow mode.
 ## What it does
 
 - **Looks ahead.** Every 5 minutes it projects each room's temperature for the next 6 hours with the AC off, using a learned thermal model per room and your hourly forecast.
-- **Lets rooms cool or warm naturally when they can.** It only starts the AC at the latest moment that still keeps the room in band. A room that is already a little outside its band (up to 0.7 °C) is left alone if the forecast has it back inside within 45 minutes on its own. Beyond 1 °C it always acts.
+- **Lets rooms cool or warm naturally when they can.** It only starts the AC at the latest moment that still keeps the room in band. A room that is already a little outside its band (up to 0.7 °C) is left alone if the forecast has it back inside within 45 minutes on its own. A slight excursion (within the tolerance, 0.3 °C by default) is left alone however long it lasts, as long as the room comes back on its own within the 6-hour look-ahead; this works the same way for heating. Beyond 1 °C it always acts.
 - **Is ready on time.** It pre-cools or pre-heats before the overnight window starts, so the priority room is already in band at bedtime.
 - **Prevents short-cycling.** It runs in proper blocks, with a minimum run time, a minimum off time, and a target set below the band edge.
 - **Uses tiers to decide which rooms get air:**

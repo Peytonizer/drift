@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Slight excursions (within tolerance) are now left alone however long they last, provided
+  the room comes back on its own within the look-ahead; previously only short ones were. On
+  the first live evening Drift started the whole system to shave 0.3 °C off a room that was
+  already falling. Applies to cooling and heating alike.
+- A manual pause, the last stop time and the current run's start are saved, so a restart or
+  an options reload no longer lets Drift undo someone stopping the AC or restart the
+  compressor inside its minimum off time.
 - Optional outdoor temperature sensor. A real observation replaces the weather entity's
   model estimate while it's fresh (reported within 90 min), and the gap between them is
   carried into the forecast, fading out over three hours, because a model running warm now
