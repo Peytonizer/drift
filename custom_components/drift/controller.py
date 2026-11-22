@@ -1164,7 +1164,9 @@ class DriftController:
         mst = self.hass.states.get(main)
         if self.ac_mode_actual != d.action or self.ac_unavailable_since is not None:
             await self._send_mode(d.action, now)
-            self.running_precool = d.precool
+        # every cycle, not only at a start: a pre-cool that carries on as an ordinary run (a need
+        # fell due while the solar faded) must stop being treated as one
+        self.running_precool = d.precool
         if drv and mst and mst.attributes.get("temperature") != drv.setpoint:
             await self._call("climate", "set_temperature", {"entity_id": main, "temperature": drv.setpoint})
         self.expected_mode = d.action

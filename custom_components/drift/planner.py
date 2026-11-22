@@ -421,7 +421,8 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
         elif z.zone_id in needing:
             on = True
         elif z.tier == 2:
-            on = z.temp > target if mode == "cool" else z.temp < target
+            # a pre-cool is for the tier 1 room: tier 2 rooms only join it if they need cooling themselves
+            on = False if precool else (z.temp > target if mode == "cool" else z.temp < target)
         else:  # tier 3: piggyback only when drifting towards the edge of its band
             on = z.temp > hi - 1.0 if mode == "cool" else z.temp < lo + 1.0
         cmds[z.zone_id] = ZoneCommand(on, _setpoint_for(inp, mode, target), target)
@@ -429,7 +430,8 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
     open_count = sum(1 for c in cmds.values() if c.on)
     if open_count < s.min_open_zones:
         closed = [z for z in zones if not cmds[z.zone_id].on]
-        closed.sort(key=lambda z: (z.tier, -(z.temp or 0) if mode == "cool" else (z.temp or 0)))
+        # during a pre-cool the filler zones are the low-priority rooms, so the tier 2 room isn't cooled by default
+        closed.sort(key=lambda z: (-z.tier if precool else z.tier, -(z.temp or 0) if mode == "cool" else (z.temp or 0)))
         for z in closed[: s.min_open_zones - open_count]:
             cmds[z.zone_id].on = True
     # MyZone: highest-priority zone that still needs conditioning
@@ -485,7 +487,8 @@ def plan(inp: PlanInput) -> Decision:
     def build(action: str, reason: str, precool: bool = False) -> Decision:
         d = Decision(action=action, reason=reason, precool=precool, predictions=preds, needs=needs, recoveries=recoveries)
         if action in ("cool", "heat"):
-            needing = {n.zone_id for n in needs if n.mode == action}
+            # a pre-cool opens the tier 1 room (and whatever the ductwork needs), not every room with a later need
+            needing = {n.zone_id for n in needs if n.mode == action and (n.tier == 1 or not precool)}
             d.zone_commands, d.myzone = _zone_commands(inp, action, precool, needing)
             d.driver_zone = d.myzone
         future = [n.latest_start for n in needs if n.latest_start > now]
@@ -501,33 +504,46 @@ def plan(inp: PlanInput) -> Decision:
     if inp.ac_mode in ("cool", "heat"):
         mode = inp.ac_mode
         precool = inp.running_precool
+        future_need = [n for n in needs if n.mode == mode]
+        opposite_due = [n for n in due if n.mode != mode and n.tier == 1]
+        # A pre-cool lives on spare solar, so it ends when the surplus drops or the switch is turned
+        # off, even though a room will need cooling later: that cooling is then an ordinary run at
+        # the latest start, not a grid-powered pre-cool. If a need is already due (or a hard limit
+        # is crossed) the run carries on, as an ordinary run to the ordinary target.
+        precool_ending = precool and (
+            not s.precool_enabled
+            or (inp.solar_surplus_w is not None and inp.solar_surplus_w < 0.5 * s.precool_min_surplus_w)
+        )
+        needed_now = any(n.mode == mode for n in due) or any(m == mode for _, m in hard)
+        precool_run = precool and not (precool_ending and needed_now)
         # zones still above/below their target (the reason we're running)
         unsatisfied = []
         for z in inp.zones:
             if z.temp is None:
                 continue
-            tgt = _target(inp, z, mode, precool)
+            if precool_run and z.tier != 1:
+                continue  # a pre-cool is for the tier 1 room only
+            tgt = _target(inp, z, mode, precool_run)
             lo, hi = inp.band_fn(z.zone_id, now)
             if z.tier <= 2:
                 if (mode == "cool" and z.temp > tgt + 0.2) or (mode == "heat" and z.temp < tgt - 0.2):
                     unsatisfied.append(z)
             elif (mode == "cool" and z.temp > hi) or (mode == "heat" and z.temp < lo):
                 unsatisfied.append(z)
-        future_need = [n for n in needs if n.mode == mode]
-        opposite_due = [n for n in due if n.mode != mode and n.tier == 1]
 
         if inp.run_is_ours and runtime < min_run and not opposite_due:
-            return build(mode, f"{mode.title()}ing (minimum run until {_fmt(inp.ac_since + min_run)})", precool)
+            return build(mode, f"{mode.title()}ing (minimum run until {_fmt(inp.ac_since + min_run)})", precool_run)
         if opposite_due:
             return build("off", f"Stopping {mode}: {zones_by_id[opposite_due[0].zone_id].name} now needs {opposite_due[0].mode}")
-        if precool and inp.solar_surplus_w is not None and inp.solar_surplus_w < 0.5 * s.precool_min_surplus_w and not future_need:
-            return build("off", "Pre-cool stopped: solar surplus has dropped")
+        if precool_ending and precool_run:
+            why = "pre-cool switched off" if not s.precool_enabled else "solar surplus has dropped"
+            return build("off", f"Pre-cool stopped: {why}")
         if not unsatisfied:
             return build("off", f"{mode.title()}ing complete: zones reached target")
         if not future_need and not hard:
             return build("off", f"Stopping {mode}: forecast says zones stay in band without it")
         names = ", ".join(z.name for z in sorted(unsatisfied, key=lambda z: z.tier)[:3])
-        return build(mode, f"{mode.title()}ing until target: {names}", precool)
+        return build(mode, f"{mode.title()}ing until target: {names}", precool_run)
 
     # ------------------------------------------------------------ currently off
     hard_modes = [m for _, m in hard]
@@ -563,7 +579,9 @@ def plan(inp: PlanInput) -> Decision:
     ):
         rest_of_day = [p.temp for p in inp.forecast if now <= p.when <= now.replace(hour=23, minute=59)]
         hot = max(rest_of_day + ([inp.outdoor_now] if inp.outdoor_now is not None else []), default=0) >= s.precool_min_outdoor
-        evening_need = [n for n in needs if n.mode == "cool" and n.tier <= 2]
+        # Only the tier 1 room is pre-cooled: it holds the cool behind a shut door, while a big
+        # room with its door always open leaks it, and cooling that later (outdoors cooler) is cheaper.
+        evening_need = [n for n in needs if n.mode == "cool" and n.tier == 1]
         if hot and evening_need:
             zname = zones_by_id[evening_need[0].zone_id].name
             return build(

@@ -16,7 +16,7 @@ Status: unreleased. Installed and running in shadow mode.
   - Tier 3 (the rest) stays shut unless it's near the edge of its wide band, or needed to keep a minimum number of zones open for the ducts.
   - Constant zones (the AC's pressure-relief zones, marked C on the wall panel) are never switched off, so the AC's own controller can always open them.
 - **Sleepwear (TOG) mode.** Pick the TOG of the sleep suit or bag being worn tonight, and the tier 1 band follows the chart. At a set time each afternoon it suggests the TOG that suits the room's natural temperature tonight, which means the least AC work.
-- **Solar pre-cool.** On hot afternoons with spare solar, it cools the house harder before evening.
+- **Solar pre-cool.** On hot afternoons with spare solar, it cools the priority room harder before evening. It stops when the spare solar fades or the switch is turned off, and leaves the other bedrooms to be cooled later.
 - **Tracks energy.** It learns the AC's power draw from the step change on a grid meter each time the AC starts or stops. It then splits the AC's energy into solar and grid.
 - **Reviews each night.** It records the time in band, compressor starts, runtime, energy, the solar/grid split, cost, forecast accuracy and the TOG in use. It also suggests tuning changes, but never applies them on its own.
 - **Learns each room from history.** On first start it trains each room's model on the last week of recorder history, so predictions are sound from the first night; it keeps learning from then on. A *Relearn room models from history* button redoes this, e.g. at a change of season.

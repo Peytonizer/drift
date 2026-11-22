@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Solar pre-cool is for the tier 1 room only, and it ends with the solar. A pre-cool now starts
+  only when the tier 1 room will need cooling later, opens only that room (plus low-priority
+  filler rooms the ductwork needs, not the tier 2 room), and is finished when the tier 1 room
+  reaches its pre-cool target. A big room that is always open to the rest of the house leaks
+  banked cool, and cooling it later when it is cooler outside costs less per degree. A running
+  pre-cool also stops when the spare solar drops below half the start threshold (before, it kept
+  going whenever any room would need cooling later, which was on grid power) and when the solar
+  pre-cool switch is turned off (before, the switch only blocked starts). If a cooling need is
+  already due when that happens, the run carries on as an ordinary run to the ordinary target
+  instead of stopping and restarting.
 - Door-aware room model (optional). Give the tier 1 room a door sensor (Configure → Zones) and
   Drift learns that room's passive drift separately for door open and door shut, because a shut
   door slows the room's heat exchange with the rest of the house and one set of parameters can

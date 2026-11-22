@@ -701,3 +701,85 @@ def test_door_models_round_trip():
     d2 = DoorModels.from_dict(d.to_dict())
     assert (d2.open.a, d2.open.n_passive, d2.closed.a, d2.closed.n_passive) == (0.1, 5, 0.03, 9)
     assert DoorModels.from_dict(None).closed.n_passive == 0
+
+
+# ------------------------------------------------------------------ pre-cool: tier 1 room only, ends with the solar
+def _hot_day():
+    day = datetime(2026, 1, 15, 0, 0, tzinfo=AEDT)
+    f = hot_forecast(day, {14: 34, 15: 36, 16: 36, 17: 35, 18: 34, 19: 32, 20: 30, 21: 28, 22: 26})
+    return day.replace(hour=14, minute=0), f
+
+
+def _running_precool(now, f, nursery, master, surplus, **kw):
+    from dataclasses import replace
+
+    inp = mk(now, zones(nursery, master), f, 34, ac_mode="cool", ac_since=now - timedelta(minutes=45), surplus=surplus, cloud=0, **kw)
+    return plan(replace(inp, run_is_ours=True, running_precool=True))
+
+
+def test_precool_needs_a_tier_one_need():
+    """Another room needing cooling later doesn't start a pre-cool: only the room that keeps its cool does."""
+    now, f = _hot_day()
+    no_tier1 = [z for z in zones(23.5, 24.8) if z.tier != 1]
+    d = plan(mk(now, no_tier1, f, 34, surplus=4000, cloud=0))
+    assert not d.precool, d.reason
+    d = plan(mk(now, zones(23.5, 24.8), f, 34, surplus=4000, cloud=0))
+    assert d.precool and "Nursery" in d.reason
+
+
+def test_precool_leaves_the_tier_two_room_closed():
+    now, f = _hot_day()
+    d = plan(mk(now, zones(23.5, 24.8), f, 34, surplus=4000, cloud=0))
+    assert d.precool
+    assert d.zone_commands["nursery"].on
+    assert not d.zone_commands["master"].on, "the big open-door room is cooled later, not pre-cooled"
+    # the duct-protection filler is a tier 3 room, not Master
+    assert sum(1 for c in d.zone_commands.values() if c.on) == 3
+
+
+def test_ordinary_cooling_still_opens_the_tier_two_room():
+    now = datetime(2026, 1, 15, 22, 0, tzinfo=AEDT)
+    f = hot_forecast(now, {22: 32, 23: 31, 0: 30})
+    d = plan(mk(now, zones(25.6, 24.8, others=24.0), f, 32))
+    assert not d.precool and d.zone_commands["master"].on
+
+
+def test_running_precool_ignores_the_tier_two_room():
+    """Done when the tier 1 room is at its pre-cool target, however warm Master still is."""
+    now, f = _hot_day()
+    d = _running_precool(now, f, nursery=22.0, master=24.9, surplus=4000)
+    assert d.action == "off" and "complete" in d.reason
+    d = _running_precool(now, f, nursery=22.6, master=22.0, surplus=4000)
+    assert d.action == "cool" and d.precool and "Nursery" in d.reason
+
+
+def test_precool_stops_when_the_solar_drops_even_with_a_later_need():
+    """The old rule kept it going whenever any room would need cooling later: i.e. on grid power."""
+    now, f = _hot_day()
+    d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=500)
+    assert d.action == "off" and "solar surplus" in d.reason
+    d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=4000)
+    assert d.action == "cool" and d.precool
+
+
+def test_precool_stops_when_the_switch_is_turned_off():
+    now, f = _hot_day()
+    d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=4000, precool_enabled=False)
+    assert d.action == "off" and "switched off" in d.reason
+
+
+def test_precool_not_stopped_inside_the_minimum_run():
+    from dataclasses import replace
+
+    now, f = _hot_day()
+    inp = mk(now, zones(25.5, 24.0), f, 34, ac_mode="cool", ac_since=now - timedelta(minutes=10), surplus=500, cloud=0)
+    d = plan(replace(inp, run_is_ours=True, running_precool=True))
+    assert d.action == "cool" and "minimum run" in d.reason
+
+
+def test_precool_with_a_need_due_carries_on_as_an_ordinary_run():
+    """The solar fades but the room's cooling is due: no stop and restart, just the ordinary target."""
+    now, f = _hot_day()
+    d = _running_precool(now, f, nursery=26.3, master=24.0, surplus=500)
+    assert d.action == "cool" and not d.precool, d.reason
+    assert d.zone_commands["master"].on  # ordinary cooling: Master is above its target too
