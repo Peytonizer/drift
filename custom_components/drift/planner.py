@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable
 
-from .model import ZoneModel, solar_factor
+from .model import DoorModels, ZoneModel, solar_factor
 
 BandFn = Callable[[str, datetime], tuple[float, float]]  # (zone_id, when) -> (min, max)
 
@@ -31,6 +31,10 @@ class ZoneInput:
     temp: float | None
     model: ZoneModel
     constant: bool = False  # the AC's pressure-relief zone: never switched off by Drift
+    # Door-aware models (IDEAS 12): only for a room with a door sensor. door_closed is None when the
+    # sensor is unavailable, which falls back to the blended model.
+    door: DoorModels | None = None
+    door_closed: bool | None = None
 
 
 @dataclass
@@ -68,6 +72,11 @@ class Settings:
     target_margin_c: float = 0.5
     coast_horizon_h: float = 12.0
     coast_min_samples: int = 50
+    # Door-aware projection. The door is assumed shut overnight whatever it reads now (it is shut
+    # from about 18:00 every night), and held at its current state by day.
+    door_min_samples: int = 100
+    door_closed_from_hour: int = 18
+    door_closed_until_hour: int = 7
 
 
 @dataclass
@@ -166,6 +175,28 @@ def outdoor_at(inp: PlanInput, when: datetime) -> tuple[float, float | None]:
     return pts[-1].temp, pts[-1].cloud
 
 
+def _door_closed_at(inp: PlanInput, zone: ZoneInput, when: datetime) -> bool | None:
+    s = inp.settings
+    if zone.door_closed is None:
+        return None
+    hour = when.hour
+    if hour >= s.door_closed_from_hour or hour < s.door_closed_until_hour:
+        return True
+    return zone.door_closed
+
+
+def model_at(inp: PlanInput, zone: ZoneInput, when: datetime) -> ZoneModel:
+    """The passive model for this room at this time: the door-specific one once it has learned
+    enough, otherwise the blended model."""
+    if zone.door is None:
+        return zone.model
+    closed = _door_closed_at(inp, zone, when)
+    if closed is None:
+        return zone.model
+    m = zone.door.for_state(closed)
+    return m if m.n_passive >= inp.settings.door_min_samples else zone.model
+
+
 def project_passive(inp: PlanInput, zone: ZoneInput, start_temp: float | None = None) -> list[tuple[datetime, float]]:
     s = inp.settings
     temp = zone.temp if start_temp is None else start_temp
@@ -178,7 +209,7 @@ def project_passive(inp: PlanInput, zone: ZoneInput, start_temp: float | None = 
     for _ in range(steps):
         t_out, cloud = outdoor_at(inp, t)
         sol = solar_factor(t, inp.lat, inp.lon, cloud)
-        temp = temp + zone.model.passive_rate(temp, t_out, sol) * dt_h
+        temp = temp + model_at(inp, zone, t).passive_rate(temp, t_out, sol) * dt_h
         t = t + timedelta(minutes=s.step_min)
         out.append((t, temp))
     return out
@@ -338,6 +369,22 @@ def coast_target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool = Fal
     return round(candidates[0], 1)  # unreachable; keeps the type checker honest
 
 
+def _coast_ready(inp: PlanInput, zone: ZoneInput) -> bool:
+    """The 12 h look-ahead is only trusted once the model is. For a room with a door sensor that
+    means both door models have learned (and the sensor is readable), because the blended model is
+    known to be off by about 0.3 °C when the door is shut. Until then the fixed depth applies."""
+    s = inp.settings
+    if zone.model.n_passive < s.coast_min_samples:
+        return False
+    if zone.door is None:
+        return True
+    return (
+        zone.door_closed is not None
+        and zone.door.open.n_passive >= s.door_min_samples
+        and zone.door.closed.n_passive >= s.door_min_samples
+    )
+
+
 def _target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
     s = inp.settings
     if (
@@ -345,7 +392,7 @@ def _target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
         and not precool
         and zone.tier <= 2
         and zone.temp is not None
-        and zone.model.n_passive >= s.coast_min_samples
+        and _coast_ready(inp, zone)
     ):
         t = coast_target(inp, zone, mode, precool)
         if t is not None:

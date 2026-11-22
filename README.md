@@ -36,7 +36,7 @@ Then go to **Settings → Devices & services → Add integration → Drift**.
 | System | Main AC unit | `climate.ac` |
 | | MyZone selector | `select.ac_myzone` |
 | | Weather (hourly forecast) | `weather.home` |
-| Zones | Tier 1 zone (+ optional room sensor) | `climate.ac_bedroom_1` / `sensor.bedroom_1_temperature` |
+| Zones | Tier 1 zone (+ optional room sensor, + optional door sensor) | `climate.ac_bedroom_1` / `sensor.bedroom_1_temperature` |
 | | Tier 2 zones | `climate.ac_main_bedroom` |
 | | Tier 3 zones | everything else |
 | | Constant zones | the zones marked C on the wall panel |
@@ -46,6 +46,8 @@ Then go to **Settings → Devices & services → Add integration → Drift**.
 | | Automations to pause | any existing AC automations it replaces |
 
 A weather entity's "current" temperature is usually a model estimate and can be several degrees out (a rainy evening is the classic case). With an outdoor sensor set, Drift uses its reading while it has reported in the last 90 minutes, carries the model's error into the forecast and fades it out over three hours, and falls back to the weather entity if the sensor goes quiet. `sensor.drift_status` → `outdoor_source` shows which one is in use.
+
+A door sensor on the tier 1 room is optional. With one, Drift learns the room's drift separately for door open and shut (a shut door slows heat exchange with the rest of the house), uses the shut-door model overnight (18:00 to 07:00) and the door's current state by day, and falls back to the single blended model until each has about 100 samples or if the sensor is unavailable. `sensor.drift_status` shows the door state; `sensor.drift_thermal_model_samples` shows the samples each door model has.
 
 It starts **disabled (shadow mode)**. Watch `sensor.drift_status` → `reason`, then turn on `switch.drift_control_enabled`. Switching it on turns the listed automations off, and switching it off turns them back on.
 

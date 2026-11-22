@@ -629,3 +629,75 @@ def test_setpoints_are_whole_degrees_and_stop_uses_the_target():
     # a running cool run at a 23.5 target (23 sent): a room at 23.6 is satisfied
     inp, z = _coast(23.6, [(0, 8), (14, 8)], ac_mode="cool", ac_since=NIGHT - timedelta(hours=1))
     assert pl.plan(inp).action == "off"
+
+
+# --------------------------------------------------------------------------- door-aware models (IDEAS 12)
+from sc.model import DoorModels  # noqa: E402
+
+
+def _door_zone(door_closed, open_n=200, closed_n=200, temp=24.5):
+    doors = DoorModels(
+        open=ZoneModel(a=0.20, b=0.0, c=0.0, n_passive=open_n),
+        closed=ZoneModel(a=0.02, b=0.0, c=0.0, n_passive=closed_n),
+    )
+    return ZoneInput("nursery", "Nursery", 1, temp, ZoneModel(a=0.08, b=0.0, c=0.0, n_passive=300), False, doors, door_closed)
+
+
+def _door_inp(z, outdoor=8.0, **kw):
+    f = [ForecastPoint(NIGHT + timedelta(hours=h), outdoor, 100) for h in (0, 14)]
+    inp = mk(NIGHT, [z], f, outdoor, min_open_zones=1, **kw)
+    inp.band_fn = _flat_band
+    return inp
+
+
+def test_door_model_choice_follows_the_door_and_the_clock():
+    day = NIGHT.replace(hour=14)
+    z = _door_zone(door_closed=False)
+    inp = _door_inp(z)
+    assert pl.model_at(inp, z, day) is z.door.open  # by day the door is held as it reads now
+    assert pl.model_at(inp, z, day.replace(hour=19)) is z.door.closed  # shut from 18:00 whatever it reads
+    assert pl.model_at(inp, z, day.replace(hour=3)) is z.door.closed
+    assert pl.model_at(inp, z, day.replace(hour=8)) is z.door.open
+    shut = _door_zone(door_closed=True)
+    assert pl.model_at(_door_inp(shut), shut, day) is shut.door.closed  # shut now: held shut by day
+
+
+def test_door_model_falls_back_to_the_blended_model():
+    day = NIGHT.replace(hour=14)
+    z = _door_zone(door_closed=None)  # sensor unavailable
+    assert pl.model_at(_door_inp(z), z, day) is z.model
+    z = _door_zone(door_closed=True, closed_n=10)  # shut-door model still thin
+    assert pl.model_at(_door_inp(z), z, day) is z.model
+    assert pl.model_at(_door_inp(z), z, day.replace(hour=19)) is z.model
+    z2 = ZoneInput("nursery", "Nursery", 1, 24.5, ZoneModel(n_passive=300))  # no door sensor at all
+    assert pl.model_at(_door_inp(z2), z2, day) is z2.model
+
+
+def test_shut_door_projects_a_slower_fall_than_open():
+    shut, opn = _door_zone(True), _door_zone(False)
+    t_shut = pl.project_passive(_door_inp(shut), shut)[-1][1]
+    t_open = pl.project_passive(_door_inp(opn), opn)[-1][1]
+    # NIGHT is overnight, so both project with the shut-door model: the door reading only matters by day
+    assert t_shut == t_open
+    day_inp = lambda z: pl.replace(_door_inp(z), now=NIGHT.replace(hour=10))  # noqa: E731
+    assert pl.project_passive(day_inp(opn), opn)[2][1] < pl.project_passive(day_inp(shut), shut)[2][1]
+
+
+def test_coast_waits_for_both_door_models():
+    for kw in ({"open_n": 10}, {"closed_n": 10}):
+        z = _door_zone(True, **kw)
+        inp = _door_inp(z)
+        assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False)
+    z = _door_zone(None)  # sensor unreadable: stay on the fixed depth
+    inp = _door_inp(z)
+    assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False)
+    z = _door_zone(True)  # both learned: the coast target applies (a cold night, so shallow)
+    inp = _door_inp(z)
+    assert pl._target(inp, z, "cool", False) == 23.5
+
+
+def test_door_models_round_trip():
+    d = DoorModels(ZoneModel(a=0.1, n_passive=5), ZoneModel(a=0.03, n_passive=9))
+    d2 = DoorModels.from_dict(d.to_dict())
+    assert (d2.open.a, d2.open.n_passive, d2.closed.a, d2.closed.n_passive) == (0.1, 5, 0.03, 9)
+    assert DoorModels.from_dict(None).closed.n_passive == 0

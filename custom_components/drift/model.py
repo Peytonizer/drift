@@ -142,3 +142,28 @@ class ZoneModel:
             if key in d:
                 setattr(m, key, d[key])
         return m
+
+
+@dataclass
+class DoorModels:
+    """Separate passive models for a room's door open and shut (IDEAS 12).
+
+    A shut door slows the room's heat exchange with the rest of the house, and one set of
+    parameters can only blend the two. Each model learns only from samples taken while the door
+    had already been in that state for a while; the blended model on the zone keeps learning from
+    everything and stays the fallback until a door model has enough samples.
+    """
+
+    open: ZoneModel = field(default_factory=ZoneModel)
+    closed: ZoneModel = field(default_factory=ZoneModel)
+
+    def for_state(self, closed: bool) -> ZoneModel:
+        return self.closed if closed else self.open
+
+    def to_dict(self) -> dict:
+        return {"open": self.open.to_dict(), "closed": self.closed.to_dict()}
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "DoorModels":
+        d = d or {}
+        return cls(ZoneModel.from_dict(d.get("open")), ZoneModel.from_dict(d.get("closed")))

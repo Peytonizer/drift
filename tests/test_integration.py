@@ -53,7 +53,7 @@ async def _setup_states(hass, nursery=24.5, outdoor=25.0, forecast_temps=None):
     hass.services.async_register("weather", "get_forecasts", get_forecasts, supports_response=SupportsResponse.ONLY)
 
 
-async def _config_flow(hass):
+async def _config_flow(hass, **zone_extra):
     r = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     assert r["step_id"] == "user"
     r = await hass.config_entries.flow.async_configure(
@@ -68,6 +68,7 @@ async def _config_flow(hass):
             "tier2_zones": ["climate.ac_master"],
             "tier3_zones": ["climate.ac_office", "climate.ac_lounge", "climate.ac_living"],
             "constant_zones": ["climate.ac_lounge", "climate.ac_living"],
+            **zone_extra,
         },
     )
     assert r["step_id"] == "energy"
@@ -716,4 +717,95 @@ async def test_nothing_is_sent_while_the_ac_has_not_reported_since_a_restart(has
     await c._async_control(dt_util.now())
     await hass.async_block_till_done()
     assert "cool" in _main_cmds(set_mode)
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+# --------------------------------------------------------------------------- door sensor (IDEAS 12)
+async def _door_setup(hass, freezer, door_state="off", changed_ago_min=60):
+    freezer.move_to("2026-01-15 21:00:00+11:00")
+    await _setup_states(hass, nursery=24.5, outdoor=18.0)
+    freezer.tick(-timedelta(minutes=changed_ago_min))
+    hass.states.async_set("binary_sensor.nursery_door", door_state, {"device_class": "opening"})
+    freezer.tick(timedelta(minutes=changed_ago_min))
+    async_mock_service(hass, "automation", "turn_off")
+    entry = await _config_flow(hass, tier1_door_sensor="binary_sensor.nursery_door")
+    return entry, entry.runtime_data
+
+
+async def test_door_state_selects_the_model_that_learns(hass, freezer):
+    entry, c = await _door_setup(hass, freezer, door_state="off")  # shut for an hour
+    z = next(z for z in c.zones if z.tier == 1)
+    dm = c.door_models[z.climate_id]
+    assert c.door_closed(z) is True
+    await c._async_control(dt_util.now())
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.drift_status").attributes["zones"][z.name]["door"] == "closed"
+    assert hass.states.get("sensor.drift_thermal_model_samples").attributes[f"{z.name} door"]["closed"]["samples"] == 0
+    c._learn(dt_util.now())  # first call only records the previous reading
+    freezer.tick(timedelta(minutes=5))
+    hass.states.async_set("sensor.nursery_temperature", "24.4", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    c.last_stop = None
+    c._learn(dt_util.now())
+    assert dm.closed.n_passive == 1 and dm.open.n_passive == 0
+    assert c.models[z.climate_id].n_passive == 1  # the blended model learns from everything
+
+    # the door is opened: samples stop reaching the shut-door model, then reach the open one once settled
+    hass.states.async_set("binary_sensor.nursery_door", "on", {"device_class": "opening"})
+    for temp in ("24.3", "24.2"):
+        freezer.tick(timedelta(minutes=5))
+        hass.states.async_set("sensor.nursery_temperature", temp, {"device_class": "temperature", "unit_of_measurement": "°C"})
+        c._learn(dt_util.now())
+    assert dm.closed.n_passive == 1 and dm.open.n_passive == 0  # still settling: no door model learns
+    assert c.models[z.climate_id].n_passive == 3
+    for temp in ("24.1", "24.0", "23.9"):
+        freezer.tick(timedelta(minutes=5))
+        hass.states.async_set("sensor.nursery_temperature", temp, {"device_class": "temperature", "unit_of_measurement": "°C"})
+        c._learn(dt_util.now())
+    assert dm.open.n_passive >= 1 and dm.closed.n_passive == 1
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_unreadable_door_teaches_only_the_blended_model(hass, freezer):
+    entry, c = await _door_setup(hass, freezer, door_state="unavailable")
+    z = next(z for z in c.zones if z.tier == 1)
+    assert c.door_closed(z) is None
+    c._learn(dt_util.now())
+    freezer.tick(timedelta(minutes=5))
+    hass.states.async_set("sensor.nursery_temperature", "24.4", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    c._learn(dt_util.now())
+    dm = c.door_models[z.climate_id]
+    assert dm.open.n_passive == dm.closed.n_passive == 0
+    assert c.models[z.climate_id].n_passive == 1
+    zi = c.zone_input(z)
+    assert zi.door is dm and zi.door_closed is None  # the planner falls back to the blended model
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_door_models_are_saved_and_restored(hass, freezer):
+    entry, c = await _door_setup(hass, freezer)
+    z = next(z for z in c.zones if z.tier == 1)
+    c.door_models[z.climate_id].closed.n_passive = 42
+    c.door_models[z.climate_id].closed.a = 0.031
+    await c._async_save()
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    c2 = entry.runtime_data
+    z2 = next(z for z in c2.zones if z.tier == 1)
+    assert c2.door_models[z2.climate_id].closed.n_passive == 42
+    assert c2.door_models[z2.climate_id].closed.a == 0.031
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_no_door_sensor_changes_nothing(hass, freezer):
+    freezer.move_to("2026-01-15 21:00:00+11:00")
+    await _setup_states(hass)
+    async_mock_service(hass, "automation", "turn_off")
+    entry = await _config_flow(hass)
+    c = entry.runtime_data
+    assert c.door_models == {}
+    z = next(z for z in c.zones if z.tier == 1)
+    assert c.zone_input(z).door is None
+    attrs = hass.states.get("sensor.drift_status").attributes
+    assert "door" not in attrs["zones"][z.name]
     await hass.config_entries.async_unload(entry.entry_id)

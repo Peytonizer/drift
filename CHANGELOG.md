@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Door-aware room model (optional). Give the tier 1 room a door sensor (Configure → Zones) and
+  Drift learns that room's passive drift separately for door open and door shut, because a shut
+  door slows the room's heat exchange with the rest of the house and one set of parameters can
+  only blend the two. A door model learns only from samples taken after the door has sat in one
+  state for 10 minutes. The blended model keeps learning from everything and is the fallback while
+  a door model has fewer than 100 samples or the sensor is unavailable. Projections hold the door
+  at its current state by day and assume it shut from 18:00 to 07:00. The 12-hour coast target
+  waits until both door models have learned, and until then the fixed depth applies. Rooms
+  without a sensor are unchanged. The door state shows in `sensor.drift_status` and the model
+  samples in `sensor.drift_thermal_model_samples`. Active cooling and heating rates are still
+  learned as one value per room.
 - Two restart gaps closed. If the AC isn't loaded when Drift starts, then once it reports Drift
   now recognises its own run (keeping the run's true start, who began it, and not counting a
   new start), so the minimum-run hold and the start statistics survive a full Home Assistant

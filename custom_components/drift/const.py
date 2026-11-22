@@ -14,6 +14,7 @@ CONF_MYZONE_SELECT = "myzone_select"
 CONF_WEATHER = "weather"
 CONF_TIER1_ZONE = "tier1_zone"
 CONF_TIER1_SENSOR = "tier1_sensor"
+CONF_TIER1_DOOR_SENSOR = "tier1_door_sensor"
 CONF_OUTDOOR_SENSOR = "outdoor_sensor"
 # A real observation older than this is ignored in favour of the weather entity's model value.
 # BoM AWS stations report every 30 min (sometimes 10), so 90 min allows two missed reports.

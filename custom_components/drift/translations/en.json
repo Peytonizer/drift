@@ -20,7 +20,8 @@
           "tier2_zones": "Tier 2 zones",
           "tier3_zones": "Tier 3 zones",
           "constant_zones": "Constant zones (the AC's pressure-relief zones, marked C on the wall panel): never switched off",
-          "outdoor_sensor": "Outdoor temperature sensor (optional; a real reading, e.g. the nearest BoM station, used instead of the weather service's estimate)"
+          "outdoor_sensor": "Outdoor temperature sensor (optional; a real reading, e.g. the nearest BoM station, used instead of the weather service's estimate)",
+          "tier1_door_sensor": "Tier 1 room door sensor (optional; lets the room model learn open and shut separately)"
         }
       },
       "energy": {
@@ -60,7 +61,8 @@
           "tier2_zones": "Tier 2 zones",
           "tier3_zones": "Tier 3 zones",
           "constant_zones": "Constant zones (the AC's pressure-relief zones, marked C on the wall panel): never switched off",
-          "outdoor_sensor": "Outdoor temperature sensor"
+          "outdoor_sensor": "Outdoor temperature sensor",
+          "tier1_door_sensor": "Tier 1 room door sensor (optional; lets the room model learn open and shut separately)"
         }
       },
       "energy": {

@@ -42,6 +42,7 @@ from .const import (
     CONF_RECOVERY_MINUTES,
     CONF_START_LAG,
     CONF_OUTDOOR_SENSOR,
+    CONF_TIER1_DOOR_SENSOR,
     CONF_TIER1_SENSOR,
     CONF_TIER1_ZONE,
     FORECAST_BIAS_FADE_H,
@@ -59,7 +60,7 @@ from .const import (
     WINDOW_DEFAULTS,
 )
 from .energy import AcPowerLearner, EnergyTotals, split_solar_grid
-from .model import ZoneModel, solar_factor
+from .model import DoorModels, ZoneModel, solar_factor
 from .planner import Decision, ForecastPoint, PlanInput, Settings, ZoneInput, outdoor_at, plan, project_passive
 from .rules import Rule, SensorPresence, WeeklyBlocks, presence_active, resolve_band, rule_active
 from .review import NightRecorder, ZoneSample, suggestions, summarise
@@ -67,6 +68,9 @@ from .tog import TOG_MANUAL, band_for, chart_from_options, recommend
 
 _LOGGER = logging.getLogger(__name__)
 ACTIVE_MODES = ("cool", "heat")
+# The door must have sat in one state this long before a sample counts towards its own model:
+# air exchange changes at once, but the walls and furniture take a while to follow.
+DOOR_SETTLE_MIN = 10
 
 
 def _f(state) -> float | None:
@@ -84,8 +88,17 @@ def _parse_time(v: str) -> time:
 
 
 class Zone:
-    def __init__(self, climate_id: str, tier: int, sensor_id: str | None, name: str, constant: bool = False) -> None:
+    def __init__(
+        self,
+        climate_id: str,
+        tier: int,
+        sensor_id: str | None,
+        name: str,
+        constant: bool = False,
+        door_sensor_id: str | None = None,
+    ) -> None:
         self.climate_id = climate_id
+        self.door_sensor_id = door_sensor_id
         self.tier = tier
         self.sensor_id = sensor_id
         self.name = name
@@ -111,6 +124,7 @@ class DriftController:
         self.bands: dict[str, float] = dict(BAND_DEFAULTS)
         self.window: dict[str, time] = {k: _parse_time(v) for k, v in WINDOW_DEFAULTS.items()}
         self.models: dict[str, ZoneModel] = {z.climate_id: ZoneModel() for z in self.zones}
+        self.door_models: dict[str, DoorModels] = {z.climate_id: DoorModels() for z in self.zones if z.door_sensor_id}
         self.ac_power = AcPowerLearner()
         self.totals = EnergyTotals()
         self.night = NightRecorder()
@@ -182,7 +196,9 @@ class DriftController:
         constants = set(self.cfg.get(CONF_CONSTANT_ZONES) or [])
         t1 = self.cfg.get(CONF_TIER1_ZONE)
         if t1:
-            self.zones.append(Zone(t1, 1, self.cfg.get(CONF_TIER1_SENSOR), nm(t1), t1 in constants))
+            self.zones.append(
+                Zone(t1, 1, self.cfg.get(CONF_TIER1_SENSOR), nm(t1), t1 in constants, self.cfg.get(CONF_TIER1_DOOR_SENSOR))
+            )
         for eid in self.cfg.get(CONF_TIER2_ZONES, []) or []:
             if eid != t1:
                 self.zones.append(Zone(eid, 2, None, nm(eid), eid in constants))
@@ -200,6 +216,8 @@ class DriftController:
             self.window[k] = _parse_time(v)
         for z in self.zones:
             self.models[z.climate_id] = ZoneModel.from_dict((data.get("models") or {}).get(z.climate_id))
+            if z.door_sensor_id:
+                self.door_models[z.climate_id] = DoorModels.from_dict((data.get("door_models") or {}).get(z.climate_id))
         self.ac_power = AcPowerLearner.from_dict(data.get("ac_power"))
         self.totals = EnergyTotals.from_dict(data.get("totals"))
         self.night = NightRecorder.from_dict(data.get("night"))
@@ -390,6 +408,7 @@ class DriftController:
                 "bands": self.bands,
                 "window": {k: v.strftime("%H:%M") for k, v in self.window.items()},
                 "models": {k: m.to_dict() for k, m in self.models.items()},
+                "door_models": {k: m.to_dict() for k, m in self.door_models.items()},
                 "ac_power": self.ac_power.to_dict(),
                 "totals": self.totals.to_dict(),
                 "night": self.night.to_dict(),
@@ -483,7 +502,7 @@ class DriftController:
             return
         settings = Settings(**{**vars(inp.settings), "horizon_h": hours})
         sim = PlanInput(**{**vars(inp), "settings": settings})
-        traj = project_passive(sim, ZoneInput(t1.climate_id, t1.name, 1, temp, self.models[t1.climate_id]))
+        traj = project_passive(sim, self.zone_input(t1, temp))
         overnight = [v for w, v in traj if start <= w <= end]
         rec = recommend(overnight, chart_from_options(self.cfg))
         if rec:
@@ -802,6 +821,40 @@ class DriftController:
         self.night = NightRecorder()
         await self._async_save()
 
+    # ------------------------------------------------------------------ door
+    def door_closed(self, z: Zone) -> bool | None:
+        """True shut, False open, None with no sensor or no reading. The sensor is an opening
+        sensor, so "on" means open."""
+        if not z.door_sensor_id:
+            return None
+        st = self.hass.states.get(z.door_sensor_id)
+        if st is None or st.state not in ("on", "off"):
+            return None
+        return st.state == "off"
+
+    def _door_settled(self, z: Zone, since: datetime) -> bool | None:
+        """The door state if it hasn't changed since `since` minus a settling time, else None."""
+        closed = self.door_closed(z)
+        if closed is None:
+            return None
+        st = self.hass.states.get(z.door_sensor_id)
+        if st is None or st.last_changed > since - timedelta(minutes=DOOR_SETTLE_MIN):
+            return None
+        return closed
+
+    def zone_input(self, z: Zone, temp: float | None = None) -> ZoneInput:
+        has_door = z.climate_id in self.door_models
+        return ZoneInput(
+            z.climate_id,
+            z.name,
+            z.tier,
+            self.zone_temp(z) if temp is None else temp,
+            self.models[z.climate_id],
+            z.constant,
+            self.door_models.get(z.climate_id) if has_door else None,
+            self.door_closed(z) if has_door else None,
+        )
+
     # ------------------------------------------------------------------ learning (every control cycle)
     def _learn(self, now: datetime) -> None:
         since_stop = (now - self.last_stop) if self.last_stop else timedelta(days=1)
@@ -820,6 +873,11 @@ class DriftController:
                     passive = m.passive_rate(temp0, self.outdoor, sol)
                     if self._last_learn_mode == "off" and self.ac_mode_actual == "off" and since_stop > timedelta(minutes=20):
                         m.update_passive(temp0, self.outdoor, sol, observed)
+                        # the door's own model learns only while the door has sat in one state since
+                        # before this sample began, so a door swinging mid-sample teaches nothing
+                        closed = self._door_settled(z, t0)
+                        if closed is not None:
+                            self.door_models[z.climate_id].for_state(closed).update_passive(temp0, self.outdoor, sol, observed)
                     elif self._last_learn_mode == self.ac_mode_actual and self.ac_mode_actual in ACTIVE_MODES:
                         zst = self.hass.states.get(z.climate_id)
                         tgt = zst.attributes.get("temperature") if zst else None
@@ -879,10 +937,7 @@ class DriftController:
 
             inp = PlanInput(
                 now=now,
-                zones=[
-                    ZoneInput(z.climate_id, z.name, z.tier, self.zone_temp(z), self.models[z.climate_id], z.constant)
-                    for z in self.zones
-                ],
+                zones=[self.zone_input(z) for z in self.zones],
                 forecast=self.planning_forecast(now),
                 outdoor_now=self.outdoor,
                 cloud_now=self.cloud,

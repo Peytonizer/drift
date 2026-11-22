@@ -45,6 +45,7 @@ from .const import (
     CONF_RECOVERY_MAX,
     CONF_RECOVERY_MINUTES,
     CONF_START_LAG,
+    CONF_TIER1_DOOR_SENSOR,
     CONF_TIER1_SENSOR,
     CONF_OUTDOOR_SENSOR,
     CONF_TIER1_ZONE,
@@ -58,7 +59,7 @@ from .const import (
 )
 
 
-def _ent(domain: str, multiple: bool = False, device_class: str | None = None) -> sel.EntitySelector:
+def _ent(domain: str, multiple: bool = False, device_class: str | list[str] | None = None) -> sel.EntitySelector:
     cfg = sel.EntitySelectorConfig(domain=domain, multiple=multiple)
     if device_class:
         cfg = sel.EntitySelectorConfig(domain=domain, multiple=multiple, device_class=device_class)
@@ -93,6 +94,7 @@ def zones_schema(d: dict) -> vol.Schema:
             vol.Required(CONF_TIER1_ZONE, default=d.get(CONF_TIER1_ZONE, vol.UNDEFINED)): _ent("climate"),
             _opt(CONF_TIER1_SENSOR, d): _ent("sensor", device_class="temperature"),
             _opt(CONF_OUTDOOR_SENSOR, d): _ent("sensor", device_class="temperature"),
+            _opt(CONF_TIER1_DOOR_SENSOR, d): _ent("binary_sensor", device_class=["door", "opening", "window"]),
             vol.Optional(CONF_TIER2_ZONES, default=d.get(CONF_TIER2_ZONES, [])): _ent("climate", multiple=True),
             vol.Optional(CONF_TIER3_ZONES, default=d.get(CONF_TIER3_ZONES, [])): _ent("climate", multiple=True),
             vol.Optional(CONF_CONSTANT_ZONES, default=d.get(CONF_CONSTANT_ZONES, [])): _ent("climate", multiple=True),
@@ -229,7 +231,7 @@ class DriftOptionsFlow(OptionsFlow):
         if user_input is not None:
             self._opts.update(user_input)
             # a cleared optional selector is omitted, so clear the stored value explicitly
-            for k in (CONF_TIER1_SENSOR, CONF_OUTDOOR_SENSOR):
+            for k in (CONF_TIER1_SENSOR, CONF_OUTDOOR_SENSOR, CONF_TIER1_DOOR_SENSOR):
                 if k not in user_input:
                     self._opts[k] = None
             return self._save()

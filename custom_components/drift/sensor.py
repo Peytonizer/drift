@@ -28,6 +28,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
 
 
+def _door_label(closed: bool | None) -> str:
+    return "unknown" if closed is None else ("closed" if closed else "open")
+
+
 class StatusSensor(DriftEntity, SensorEntity):
     _attr_icon = "mdi:home-thermometer"
 
@@ -66,6 +70,7 @@ class StatusSensor(DriftEntity, SensorEntity):
                     "tier": z.tier,
                     "temp": c.zone_temp(z),
                     "band": c.band(z, dt_util.now()),
+                    **({"door": _door_label(c.door_closed(z))} if z.door_sensor_id else {}),
                     "command": (
                         {
                             "on": d.zone_commands[z.climate_id].on,
@@ -220,6 +225,14 @@ class ModelSensor(DriftEntity, SensorEntity):
                 if k != "P"
             }
             for z in c.zones
+            },
+            **{
+                f"{z.name} door": {
+                    state: {"samples": dm.n_passive, **{k: round(v, 4) for k, v in dm.to_dict().items() if k in ("a", "b", "c")}}
+                    for state, dm in (("open", c.door_models[z.climate_id].open), ("closed", c.door_models[z.climate_id].closed))
+                }
+                for z in c.zones
+                if z.climate_id in c.door_models
             },
         }
 
