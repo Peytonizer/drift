@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Sleep-safe watchdog. Overnight, independent of the planner and whether control is on, off or
+  paused, Drift checks the tier 1 room's thermometer against the band in force at each reading.
+  More than 1 °C outside for 15 continuous minutes, or more than 0.5 °C outside for 45, raises a
+  notification once per incident (Home Assistant, plus the phone if set) saying the temperature,
+  the band, the TOG and what Drift is doing (cooling since a time, paused until a time, control off,
+  AC unreachable, or the planner's reason for holding off). It clears after 10 minutes back inside.
+  A tier 1 sensor that has been unavailable for 20 minutes overnight is reported too; Drift was
+  already falling back to the AC's own thermometer in that case. "Hasn't reported for 20 minutes"
+  is deliberately not the test, because a steady room's sensor reports on change only, with gaps
+  of more than an hour. The readings are kept in memory, so a restart resets the clocks.
 - Solar pre-cool is for the tier 1 room only, and it ends with the solar. A pre-cool now starts
   only when the tier 1 room will need cooling later, opens only that room (plus low-priority
   filler rooms the ductwork needs, not the tier 2 room), and is finished when the tier 1 room

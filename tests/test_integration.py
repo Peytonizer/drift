@@ -865,3 +865,95 @@ async def test_door_nudge_stays_quiet_when_it_should(hass, freezer, kwargs, twea
     await c._maybe_door_nudge(dt_util.now())
     assert not phone and not persist
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+# ------------------------------------------------------------------ sleep-safe watchdog
+async def _watch_setup(hass, freezer, at="2026-01-15 23:00:00+11:00", nursery=27.5):
+    freezer.move_to(at)
+    await _setup_states(hass, nursery=nursery, outdoor=24, forecast_temps=[24] * 8)
+    async_mock_service(hass, "climate", "set_hvac_mode")
+    async_mock_service(hass, "climate", "set_temperature")
+    async_mock_service(hass, "automation", "turn_off")
+    async_mock_service(hass, "select", "select_option")
+    create = async_mock_service(hass, "persistent_notification", "create")
+    dismiss = async_mock_service(hass, "persistent_notification", "dismiss")
+    entry = await _config_flow(hass)
+    return entry, entry.runtime_data, create, dismiss
+
+
+async def _minutes(hass, freezer, c, n):
+    for _ in range(n):
+        freezer.tick(timedelta(seconds=60))
+        await c._async_sample(dt_util.now())
+
+
+async def test_watchdog_alerts_when_the_room_stays_out_of_band_even_with_control_off(hass, freezer):
+    entry, c, create, dismiss = await _watch_setup(hass, freezer)
+    assert not c.enabled  # shadow mode: nothing else is watching
+    await _minutes(hass, freezer, c, 10)
+    assert not [x for x in create if x.data["notification_id"].startswith("drift_tier1_out")]
+    await _minutes(hass, freezer, c, 8)
+    sev = [x for x in create if x.data["notification_id"] == "drift_tier1_out_of_band_severe"]
+    assert len(sev) == 1
+    msg = sev[0].data["message"]
+    assert "27.5°C" in msg and "above" in msg and "Drift control is off" in msg
+    await _minutes(hass, freezer, c, 20)  # still out: said once, not every minute
+    assert len([x for x in create if x.data["notification_id"] == "drift_tier1_out_of_band_severe"]) == 1
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_watchdog_clears_after_ten_minutes_back_in_band(hass, freezer):
+    entry, c, create, dismiss = await _watch_setup(hass, freezer)
+    await _minutes(hass, freezer, c, 18)
+    assert "tier1_out_of_band_severe" in c._alerts
+    hass.states.async_set("sensor.nursery_temperature", "23.0", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    await _minutes(hass, freezer, c, 6)
+    assert "tier1_out_of_band_severe" in c._alerts  # not yet
+    await _minutes(hass, freezer, c, 8)
+    assert "tier1_out_of_band_severe" not in c._alerts
+    assert any(x.data["notification_id"] == "drift_tier1_out_of_band_severe" for x in dismiss)
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_watchdog_is_overnight_only(hass, freezer):
+    entry, c, create, _ = await _watch_setup(hass, freezer, at="2026-01-15 13:00:00+11:00")
+    await _minutes(hass, freezer, c, 30)
+    assert not [x for x in create if x.data["notification_id"].startswith("drift_tier1")]
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_watchdog_says_what_drift_is_doing(hass, freezer):
+    entry, c, create, _ = await _watch_setup(hass, freezer)
+    c.enabled = True
+    c.fault = None
+    hass.states.async_set("climate.ac", "cool", {"current_temperature": 27, "temperature": 23, "hvac_modes": ["off", "cool", "heat"]})
+    c.ac_mode_actual, c.ac_since = "cool", dt_util.now() - timedelta(minutes=30)
+    assert "cooling since" in c._t1_doing(dt_util.now())
+    c.override_until = dt_util.now() + timedelta(minutes=40)
+    assert "paused after a manual AC change" in c._t1_doing(dt_util.now())
+    c.fault = "The AC (MyAir) has been unavailable"
+    assert c._t1_doing(dt_util.now()) == "Drift can't reach the AC"
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_tier1_sensor_unavailable_is_reported_and_the_ac_thermometer_used(hass, freezer):
+    entry, c, create, dismiss = await _watch_setup(hass, freezer, nursery=24.5)
+    t1 = next(z for z in c.zones if z.tier == 1)
+    hass.states.async_set("sensor.nursery_temperature", "unavailable", {})
+    await _minutes(hass, freezer, c, 10)
+    assert "tier1_sensor_down" not in c._alerts
+    await _minutes(hass, freezer, c, 12)
+    assert "tier1_sensor_down" in c._alerts
+    assert c.zone_temp(t1) == 24.5  # the AC's own reading, via climate.ac_nursery
+    hass.states.async_set("sensor.nursery_temperature", "24.4", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    await _minutes(hass, freezer, c, 1)
+    assert "tier1_sensor_down" not in c._alerts
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_steady_sensor_that_reports_rarely_is_not_called_unavailable(hass, freezer):
+    """The real sensor reports on change only, with hour-long gaps when steady: silence is not a fault."""
+    entry, c, create, _ = await _watch_setup(hass, freezer, nursery=24.5)
+    await _minutes(hass, freezer, c, 90)
+    assert not [x for x in create if x.data["notification_id"].startswith("drift_tier1")]
+    await hass.config_entries.async_unload(entry.entry_id)

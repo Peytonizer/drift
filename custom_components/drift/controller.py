@@ -64,6 +64,7 @@ from .model import DoorModels, ZoneModel, solar_factor
 from .planner import Decision, ForecastPoint, PlanInput, Settings, ZoneInput, outdoor_at, plan, project_passive
 from .rules import Rule, SensorPresence, WeeklyBlocks, presence_active, resolve_band, rule_active
 from .review import NightRecorder, ZoneSample, suggestions, summarise
+from . import watchdog
 from .tog import TOG_MANUAL, band_for, chart_from_options, recommend
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,6 +74,9 @@ ACTIVE_MODES = ("cool", "heat")
 DOOR_SETTLE_MIN = 10
 # How long the door must have been open, and the run going, before asking for it to be shut.
 DOOR_NUDGE_AFTER_MIN = 3
+# The tier 1 sensor must be unavailable this long (overnight) before we say so; it reports on change only,
+# with gaps of over an hour when the room is steady, so "hasn't reported" can't be used as the test.
+SENSOR_DOWN_ALERT_MIN = 20
 
 
 def _f(state) -> float | None:
@@ -169,6 +173,9 @@ class DriftController:
         self.pending: dict | None = None  # {"mode", "first", "last", "attempts"}
         self.fault: str | None = None
         self._alerts: set[str] = set()
+        # sleep-safe watchdog: recent tier 1 readings with the band each was taken under (not persisted)
+        self._t1_series: list[watchdog.Reading] = []
+        self._t1_sensor_down_since: datetime | None = None
         self._last_control: datetime | None = None
         self.bootstrap_info: dict | None = None
         # daytime comfort rules (config subentries)
@@ -805,6 +812,7 @@ class DriftController:
         await self._check_ac_health(now)
         await self._maybe_notify(now)
         await self._maybe_door_nudge(now)
+        await self._check_watchdog(now)
         self._save_counter += 1
         if self._save_counter >= 10:
             self._save_counter = 0
@@ -1106,6 +1114,69 @@ class DriftController:
             await self._alert("ac_unreachable", "Drift can't control the AC", f"{problem}.{extra}")
         else:
             await self._clear_alert("ac_unreachable")
+
+    # ------------------------------------------------------------------ sleep-safe watchdog
+    def _t1_doing(self, now: datetime) -> str:
+        """What Drift is doing about the tier 1 room, for the watchdog's message."""
+        if self.fault:
+            return "Drift can't reach the AC"
+        if not self.enabled:
+            return "Drift control is off"
+        if self.override_until and now < self.override_until:
+            return f"Drift is paused after a manual AC change until {self.override_until.strftime('%H:%M')}"
+        if self.ac_mode_actual in ACTIVE_MODES and self.ac_since:
+            verb = "cooling" if self.ac_mode_actual == "cool" else "heating"
+            return f"the AC has been {verb} since {self.ac_since.strftime('%H:%M')}"
+        return f"the AC is off (Drift: {self.reason or 'no reason yet'})"
+
+    async def _check_watchdog(self, now: datetime) -> None:
+        """Tell the phones if the tier 1 room has been out of its band for long enough overnight.
+
+        Independent of the planner on purpose, and it runs whether control is on, off or paused:
+        those are exactly the times nothing else is watching. Overnight window only."""
+        t1 = next((z for z in self.zones if z.tier == 1), None)
+        if t1 is None:
+            return
+        keys = ("tier1_out_of_band", "tier1_out_of_band_severe", "tier1_sensor_down")
+        if not self.in_window(now):
+            self._t1_series = []
+            self._t1_sensor_down_since = None
+            for k in keys:
+                await self._clear_alert(k)
+            return
+        # a sensor that is unavailable falls back to the AC's own thermometer (zone_temp), but say so
+        st = self.hass.states.get(t1.sensor_id) if t1.sensor_id else None
+        if t1.sensor_id and (st is None or st.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)):
+            self._t1_sensor_down_since = self._t1_sensor_down_since or now
+            if now - self._t1_sensor_down_since >= timedelta(minutes=SENSOR_DOWN_ALERT_MIN):
+                await self._alert(
+                    "tier1_sensor_down",
+                    f"{t1.name} sensor unavailable",
+                    f"The {t1.name} temperature sensor has been unavailable since "
+                    f"{self._t1_sensor_down_since.strftime('%H:%M')}. Drift is using the AC's own thermometer, which reads "
+                    f"differently, until it returns.",
+                )
+        else:
+            self._t1_sensor_down_since = None
+            await self._clear_alert("tier1_sensor_down")
+
+        temp = self.zone_temp(t1)
+        if temp is not None:
+            lo, hi = self.band(t1, now)
+            self._t1_series = watchdog.trim([*self._t1_series, watchdog.Reading(now, temp, lo, hi)], now)
+        breach = watchdog.assess(self._t1_series, now)
+        if breach:
+            lo, hi = self.band(t1, now)
+            tog = f" (TOG {self.tog})" if self.tog != TOG_MANUAL else ""
+            await self._alert(
+                "tier1_out_of_band_severe" if breach.level == "severe" else "tier1_out_of_band",
+                f"{t1.name} is {breach.side} its band",
+                f"{t1.name} is {self.zone_temp(t1):.1f}°C, {breach.excess:.1f}°C {breach.side} its {lo:g}–{hi:g}°C band "
+                f"and has been beyond it for {breach.minutes:.0f} minutes{tog}. {self._t1_doing(now).capitalize()}.",
+            )
+        elif watchdog.back_in_band(self._t1_series, now):
+            await self._clear_alert("tier1_out_of_band")
+            await self._clear_alert("tier1_out_of_band_severe")
 
     async def _alert(self, key: str, title: str, message: str) -> None:
         """Raise once per incident: a Home Assistant notification, plus the phone if set up."""
