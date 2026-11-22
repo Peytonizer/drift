@@ -13,12 +13,14 @@
   is deliberately not the test, because a steady room's sensor reports on change only, with gaps
   of more than an hour. The readings are kept in memory, so a restart resets the clocks.
 - Solar pre-cool is for the tier 1 room only, and it ends with the solar. A pre-cool now starts
-  only when the tier 1 room will need cooling later, opens only that room (plus low-priority
-  filler rooms the ductwork needs, not the tier 2 room), and is finished when the tier 1 room
+  only when the tier 1 room will need cooling later, opens only that room (plus the constant
+  zones, which are always open for the ductwork; if more rooms are needed to keep enough zones
+  open, low-priority rooms come before the tier 2 room), and is finished when the tier 1 room
   reaches its pre-cool target. A big room that is always open to the rest of the house leaks
   banked cool, and cooling it later when it is cooler outside costs less per degree. A running
-  pre-cool also stops when the spare solar drops below half the start threshold (before, it kept
-  going whenever any room would need cooling later, which was on grid power) and when the solar
+  pre-cool also stops when the spare solar has stayed below half the start threshold for 10
+  minutes (before, it kept going whenever any room would need cooling later, which was on grid
+  power; the 10 minutes means a passing cloud doesn't end it) and when the solar
   pre-cool switch is turned off (before, the switch only blocked starts). If a cooling need is
   already due when that happens, the run carries on as an ordinary run to the ordinary target
   instead of stopping and restarting.

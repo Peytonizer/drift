@@ -710,11 +710,11 @@ def _hot_day():
     return day.replace(hour=14, minute=0), f
 
 
-def _running_precool(now, f, nursery, master, surplus, **kw):
+def _running_precool(now, f, nursery, master, surplus, low_min=12.0, **kw):
     from dataclasses import replace
 
     inp = mk(now, zones(nursery, master), f, 34, ac_mode="cool", ac_since=now - timedelta(minutes=45), surplus=surplus, cloud=0, **kw)
-    return plan(replace(inp, run_is_ours=True, running_precool=True))
+    return plan(replace(inp, run_is_ours=True, running_precool=True, solar_low_min=low_min))
 
 
 def test_precool_needs_a_tier_one_need():
@@ -783,3 +783,22 @@ def test_precool_with_a_need_due_carries_on_as_an_ordinary_run():
     d = _running_precool(now, f, nursery=26.3, master=24.0, surplus=500)
     assert d.action == "cool" and not d.precool, d.reason
     assert d.zone_commands["master"].on  # ordinary cooling: Master is above its target too
+
+
+def test_a_passing_cloud_does_not_end_a_precool():
+    """The surplus must stay low for 10 minutes before the pre-cool stops; a dip is not the sun going."""
+    now, f = _hot_day()
+    for minutes in (0.0, 3.0, 9.0):
+        d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=500, low_min=minutes)
+        assert d.action == "cool" and d.precool, (minutes, d.reason)
+    d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=500, low_min=10.0)
+    assert d.action == "off" and "solar surplus" in d.reason
+    # recovered: back above the stop level, so it carries on whatever the earlier dip was
+    d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=4000, low_min=30.0)
+    assert d.action == "cool" and d.precool
+
+
+def test_switching_the_precool_off_is_immediate_not_debounced():
+    now, f = _hot_day()
+    d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=4000, low_min=0.0, precool_enabled=False)
+    assert d.action == "off" and "switched off" in d.reason

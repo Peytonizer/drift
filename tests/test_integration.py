@@ -957,3 +957,20 @@ async def test_a_steady_sensor_that_reports_rarely_is_not_called_unavailable(has
     await _minutes(hass, freezer, c, 90)
     assert not [x for x in create if x.data["notification_id"].startswith("drift_tier1")]
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_solar_dip_is_timed_from_when_the_surplus_first_fell_low(hass, freezer):
+    """The planner only ends a pre-cool once the dip has lasted, so the controller must time it."""
+    entry, c, _, _ = await _watch_setup(hass, freezer, at="2026-01-15 14:00:00+11:00", nursery=24.5)
+    await _minutes(hass, freezer, c, 3)
+    low_since = c._solar_low_since
+    assert low_since is not None  # export is -500 W: well under the stop level
+    await _minutes(hass, freezer, c, 3)
+    assert c._solar_low_since == low_since  # still the same dip, not restarted
+    hass.states.async_set("sensor.grid_power", "4000", {"unit_of_measurement": "W"})  # a good surplus returns
+    await _minutes(hass, freezer, c, 1)
+    assert c._solar_low_since is None
+    hass.states.async_set("sensor.grid_power", "-500", {"unit_of_measurement": "W"})
+    await _minutes(hass, freezer, c, 2)
+    assert c._solar_low_since is not None and c._solar_low_since > low_since  # a new dip, timed afresh
+    await hass.config_entries.async_unload(entry.entry_id)

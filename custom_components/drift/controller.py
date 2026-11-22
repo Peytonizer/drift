@@ -175,6 +175,7 @@ class DriftController:
         self._alerts: set[str] = set()
         # sleep-safe watchdog: recent tier 1 readings with the band each was taken under (not persisted)
         self._t1_series: list[watchdog.Reading] = []
+        self._solar_low_since: datetime | None = None  # when the spare solar fell below the pre-cool stop level
         self._t1_sensor_down_since: datetime | None = None
         self._last_control: datetime | None = None
         self.bootstrap_info: dict | None = None
@@ -772,6 +773,7 @@ class DriftController:
         if grid is not None and not self.cfg.get(CONF_GRID_IMPORT_NEGATIVE, True):
             grid = -grid
         self.grid_w_export = grid
+        self._track_solar_dip(now)
         ac_on = self.ac_mode_actual in ACTIVE_MODES
         self.ac_watts_now = self.ac_power.ac_watts if ac_on else 0.0
         solar_w, grid_w = split_solar_grid(self.ac_watts_now, grid)
@@ -892,6 +894,24 @@ class DriftController:
             f"Shutting it keeps the {'heat' if heating else 'cool'} in and the run shorter.",
         )
 
+    def _surplus_now(self) -> float | None:
+        """Export that would be available if the AC were off."""
+        if self.grid_w_export is None:
+            return None
+        return self.grid_w_export + (self.ac_watts_now if self.ac_mode_actual in ACTIVE_MODES else 0)
+
+    def _track_solar_dip(self, now: datetime) -> None:
+        """Note how long the spare solar has been below the level at which a pre-cool should end.
+
+        Sampled every minute (the control cycle is every 5), so a cloud that passes between cycles,
+        or sits on one reading, doesn't end a pre-cool: the planner waits for the dip to last."""
+        surplus = self._surplus_now()
+        low = surplus is not None and surplus < 0.5 * float(self.cfg[CONF_PRECOOL_MIN_SURPLUS])
+        if not low:
+            self._solar_low_since = None
+        elif self._solar_low_since is None:
+            self._solar_low_since = now
+
     def zone_input(self, z: Zone, temp: float | None = None) -> ZoneInput:
         has_door = z.climate_id in self.door_models
         return ZoneInput(
@@ -985,9 +1005,7 @@ class DriftController:
             self._learn(now)
             await self._async_refresh_forecast(now)
 
-            surplus = None
-            if self.grid_w_export is not None:
-                surplus = self.grid_w_export + (self.ac_watts_now if self.ac_mode_actual in ACTIVE_MODES else 0)
+            surplus = self._surplus_now()
 
             inp = PlanInput(
                 now=now,
@@ -1004,6 +1022,7 @@ class DriftController:
                 last_stop=self.last_stop,
                 running_precool=self.running_precool,
                 solar_surplus_w=surplus,
+                solar_low_min=(now - self._solar_low_since).total_seconds() / 60 if self._solar_low_since else 0.0,
                 settings=self._settings(),
                 run_is_ours=self.run_is_ours,
                 **self._setpoint_limits(),

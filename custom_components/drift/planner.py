@@ -64,6 +64,7 @@ class Settings:
     precool_start_hour: int = 13
     precool_min_outdoor: float = 28.0
     precool_min_surplus_w: float = 2500
+    precool_stop_after_min: float = 10  # the surplus must stay low this long before a pre-cool ends (a passing cloud isn't the sun going)
     allow_cooling: bool = True
     allow_heating: bool = True
     # Forecast-aware target (IDEAS 14): aim for the shallowest target from which the room's own
@@ -95,6 +96,7 @@ class PlanInput:
     last_stop: datetime | None
     running_precool: bool = False
     solar_surplus_w: float | None = None  # export available if AC were off
+    solar_low_min: float = 0.0  # minutes the surplus has stayed below the pre-cool stop level
     settings: Settings = field(default_factory=Settings)
     # False when the run in progress wasn't started by Drift (inherited across a restart or begun
     # by a person): the minimum-run hold exists to protect the compressor from Drift's own
@@ -510,10 +512,13 @@ def plan(inp: PlanInput) -> Decision:
         # off, even though a room will need cooling later: that cooling is then an ordinary run at
         # the latest start, not a grid-powered pre-cool. If a need is already due (or a hard limit
         # is crossed) the run carries on, as an ordinary run to the ordinary target.
-        precool_ending = precool and (
-            not s.precool_enabled
-            or (inp.solar_surplus_w is not None and inp.solar_surplus_w < 0.5 * s.precool_min_surplus_w)
+        # Switching it off is a decision and acts at once; a low surplus must last, so a cloud doesn't end it.
+        solar_gone = (
+            inp.solar_surplus_w is not None
+            and inp.solar_surplus_w < 0.5 * s.precool_min_surplus_w
+            and inp.solar_low_min >= s.precool_stop_after_min
         )
+        precool_ending = precool and (not s.precool_enabled or solar_gone)
         needed_now = any(n.mode == mode for n in due) or any(m == mode for _, m in hard)
         precool_run = precool and not (precool_ending and needed_now)
         # zones still above/below their target (the reason we're running)
