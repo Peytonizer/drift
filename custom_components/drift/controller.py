@@ -71,6 +71,8 @@ ACTIVE_MODES = ("cool", "heat")
 # The door must have sat in one state this long before a sample counts towards its own model:
 # air exchange changes at once, but the walls and furniture take a while to follow.
 DOOR_SETTLE_MIN = 10
+# How long the door must have been open, and the run going, before asking for it to be shut.
+DOOR_NUDGE_AFTER_MIN = 3
 
 
 def _f(state) -> float | None:
@@ -802,6 +804,7 @@ class DriftController:
 
         await self._check_ac_health(now)
         await self._maybe_notify(now)
+        await self._maybe_door_nudge(now)
         self._save_counter += 1
         if self._save_counter >= 10:
             self._save_counter = 0
@@ -842,6 +845,45 @@ class DriftController:
             return None
         return closed
 
+    def _door_night(self, when: datetime) -> bool:
+        s = Settings()
+        return when.hour >= s.door_closed_from_hour or when.hour < s.door_closed_until_hour
+
+    async def _maybe_door_nudge(self, now: datetime) -> None:
+        """Tell the phones to shut the tier 1 room's door when Drift is running the AC for it.
+
+        Once per run, by day only (from 18:00 a door left ajar counts as shut, and a night nudge
+        would wake people), and only after the door and the run have both settled for a few
+        minutes so walking through doesn't trigger it. Only for runs Drift started, and never
+        while control is off."""
+        t1 = next((z for z in self.zones if z.tier == 1 and z.door_sensor_id), None)
+        if t1 is None:
+            return
+        if not (self.enabled and self.ac_mode_actual in ACTIVE_MODES and self.run_is_ours):
+            await self._clear_alert("door_open")
+            return
+        st = self.hass.states.get(t1.door_sensor_id)
+        zst = self.hass.states.get(t1.climate_id)
+        if (
+            self.door_closed(t1) is not False
+            or st is None
+            or zst is None
+            or zst.state == "off"  # the room isn't part of this run
+            or self._door_night(now)
+            or self.ac_since is None
+            or now - self.ac_since < timedelta(minutes=DOOR_NUDGE_AFTER_MIN)
+            or now - st.last_changed < timedelta(minutes=DOOR_NUDGE_AFTER_MIN)
+        ):
+            return
+        heating = self.ac_mode_actual == "heat"
+        extra = " on the solar surplus" if self.running_precool else ""
+        await self._alert(
+            "door_open",
+            f"Shut {t1.name}'s door",
+            f"The AC is {'heating' if heating else 'cooling'} {t1.name}{extra} and its door is open. "
+            f"Shutting it keeps the {'heat' if heating else 'cool'} in and the run shorter.",
+        )
+
     def zone_input(self, z: Zone, temp: float | None = None) -> ZoneInput:
         has_door = z.climate_id in self.door_models
         return ZoneInput(
@@ -876,6 +918,10 @@ class DriftController:
                         # the door's own model learns only while the door has sat in one state since
                         # before this sample began, so a door swinging mid-sample teaches nothing
                         closed = self._door_settled(z, t0)
+                        # ajar at night counts as shut: it is close enough, and the planner
+                        # projects the night with the shut-door model
+                        if closed is not None and self._door_night(mid):
+                            closed = True
                         if closed is not None:
                             self.door_models[z.climate_id].for_state(closed).update_passive(temp0, self.outdoor, sol, observed)
                     elif self._last_learn_mode == self.ac_mode_actual and self.ac_mode_actual in ACTIVE_MODES:

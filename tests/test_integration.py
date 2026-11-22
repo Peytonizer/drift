@@ -721,8 +721,8 @@ async def test_nothing_is_sent_while_the_ac_has_not_reported_since_a_restart(has
 
 
 # --------------------------------------------------------------------------- door sensor (IDEAS 12)
-async def _door_setup(hass, freezer, door_state="off", changed_ago_min=60):
-    freezer.move_to("2026-01-15 21:00:00+11:00")
+async def _door_setup(hass, freezer, door_state="off", changed_ago_min=60, at="21:00"):
+    freezer.move_to(f"2026-01-15 {at}:00+11:00")
     await _setup_states(hass, nursery=24.5, outdoor=18.0)
     freezer.tick(-timedelta(minutes=changed_ago_min))
     hass.states.async_set("binary_sensor.nursery_door", door_state, {"device_class": "opening"})
@@ -733,7 +733,7 @@ async def _door_setup(hass, freezer, door_state="off", changed_ago_min=60):
 
 
 async def test_door_state_selects_the_model_that_learns(hass, freezer):
-    entry, c = await _door_setup(hass, freezer, door_state="off")  # shut for an hour
+    entry, c = await _door_setup(hass, freezer, door_state="off", at="13:00")  # shut for an hour, by day
     z = next(z for z in c.zones if z.tier == 1)
     dm = c.door_models[z.climate_id]
     assert c.door_closed(z) is True
@@ -808,4 +808,60 @@ async def test_no_door_sensor_changes_nothing(hass, freezer):
     assert c.zone_input(z).door is None
     attrs = hass.states.get("sensor.drift_status").attributes
     assert "door" not in attrs["zones"][z.name]
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_door_ajar_at_night_counts_as_shut(hass, freezer):
+    entry, c = await _door_setup(hass, freezer, door_state="on", at="21:00")  # reads open, for an hour
+    z = next(z for z in c.zones if z.tier == 1)
+    assert c.door_closed(z) is False
+    c._learn(dt_util.now())
+    freezer.tick(timedelta(minutes=5))
+    hass.states.async_set("sensor.nursery_temperature", "24.4", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    c._learn(dt_util.now())
+    dm = c.door_models[z.climate_id]
+    assert dm.closed.n_passive == 1 and dm.open.n_passive == 0
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def _nudge_ready(hass, freezer, at="13:00", door="on"):
+    entry, c = await _door_setup(hass, freezer, door_state=door, at=at)
+    persist = async_mock_service(hass, "persistent_notification", "create")
+    phone = async_mock_service(hass, "notify", "phone")
+    c.cfg["notify_service"] = "notify.phone"
+    c.enabled, c.run_is_ours = True, True
+    c.ac_mode_actual, c.ac_since = "cool", dt_util.now() - timedelta(minutes=10)
+    return entry, c, persist, phone
+
+
+async def test_open_door_during_a_run_nudges_the_phone_once(hass, freezer):
+    entry, c, persist, phone = await _nudge_ready(hass, freezer)
+    await c._maybe_door_nudge(dt_util.now())
+    assert len(phone) == 1 and "door is open" in phone[0].data["message"] and len(persist) == 1
+    await c._maybe_door_nudge(dt_util.now())
+    assert len(phone) == 1  # once per run
+    c.ac_mode_actual = "off"  # the run ends: the next one may nudge again
+    await c._maybe_door_nudge(dt_util.now())
+    c.ac_mode_actual, c.ac_since = "cool", dt_util.now() - timedelta(minutes=5)
+    await c._maybe_door_nudge(dt_util.now())
+    assert len(phone) == 2
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize(
+    "kwargs, tweak",
+    [
+        ({"door": "off"}, None),  # door shut
+        ({"at": "21:00"}, None),  # night: ajar counts as shut
+        ({}, lambda c: setattr(c, "enabled", False)),  # shadow mode
+        ({}, lambda c: setattr(c, "run_is_ours", False)),  # not Drift's run
+        ({}, lambda c: setattr(c, "ac_since", dt_util.now() - timedelta(minutes=1))),  # run only just began
+    ],
+)
+async def test_door_nudge_stays_quiet_when_it_should(hass, freezer, kwargs, tweak):
+    entry, c, persist, phone = await _nudge_ready(hass, freezer, **kwargs)
+    if tweak:
+        tweak(c)
+    await c._maybe_door_nudge(dt_util.now())
+    assert not phone and not persist
     await hass.config_entries.async_unload(entry.entry_id)

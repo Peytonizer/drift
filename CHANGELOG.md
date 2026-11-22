@@ -12,7 +12,12 @@
   waits until both door models have learned, and until then the fixed depth applies. Rooms
   without a sensor are unchanged. The door state shows in `sensor.drift_status` and the model
   samples in `sensor.drift_thermal_model_samples`. Active cooling and heating rates are still
-  learned as one value per room.
+  learned as one value per room. A door left ajar from 18:00 to 07:00 counts as shut when
+  learning, so the open-door model only learns from daytime readings.
+- Shut-the-door nudge. When Drift is running the AC for a room with a door sensor and the door
+  has been open for 3 minutes into the run, it notifies the phone (and Home Assistant) once per
+  run, including solar pre-cool runs. Day only: never from 18:00 to 07:00, never in shadow
+  mode, and never for a run Drift didn't start.
 - Two restart gaps closed. If the AC isn't loaded when Drift starts, then once it reports Drift
   now recognises its own run (keeping the run's true start, who began it, and not counting a
   new start), so the minimum-run hold and the start statistics survive a full Home Assistant
