@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Pre-cool is forecast-aware. It now aims for the shallowest target from which the tier 1 room's
+  own drift stays in band for the next 12 hours (the same rule an ordinary run uses), and
+  `precool_depth` is only the deepest it may go. Before, it always cooled `precool_depth` below the
+  band edge, which with a wide band could bank the room cold enough to fall below its band
+  overnight and need heat. Until the room's model is trusted (enough samples, and both door models
+  for a room with a door sensor) the forecast can't say how deep is safe, so a pre-cool goes no
+  deeper than an ordinary run (`cool_depth`). With forecast-aware targets switched off it keeps the
+  full `precool_depth`.
 - Run cap for the tier 2 room. A tier 2 room now stops at its target *or* after 45 minutes open
   (Tuning: "Tier 2 run cap", 0 turns it off), whichever comes first. Its zone is then shut for a
   60-minute cool-down (Tuning: "Tier 2 cool-down") and its needs are ignored until it ends, so a

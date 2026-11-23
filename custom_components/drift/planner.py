@@ -321,12 +321,12 @@ def _band_for_target(inp: PlanInput, zone: ZoneInput, precool: bool) -> tuple[fl
     return lo, hi
 
 
-def _depth_target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
+def _depth_target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool, depth: float | None = None) -> float:
     """The fixed-depth target: a set distance inside the band edge, whatever the forecast."""
     s = inp.settings
     lo, hi = _band_for_target(inp, zone, precool)
     if mode == "cool":
-        depth = s.precool_depth if precool else s.cool_depth
+        depth = depth if depth is not None else (s.precool_depth if precool else s.cool_depth)
         return round(max(lo + 0.5, hi - depth), 1)
     return round(min(hi - 0.5, lo + s.heat_depth), 1)
 
@@ -395,16 +395,18 @@ def _coast_ready(inp: PlanInput, zone: ZoneInput) -> bool:
 
 def _target(inp: PlanInput, zone: ZoneInput, mode: str, precool: bool) -> float:
     s = inp.settings
-    if (
-        s.coast_target
-        and not precool
-        and zone.tier <= 2
-        and zone.temp is not None
-        and _coast_ready(inp, zone)
-    ):
+    forecast_aware = s.coast_target and zone.tier <= 2 and zone.temp is not None
+    if forecast_aware and _coast_ready(inp, zone):
+        # A pre-cool is forecast-aware too (IDEAS 14): precool_depth is only the deepest it may go,
+        # and the room is cooled no further than the coming night needs, so it isn't banked so cold
+        # that it falls below its band and needs heat.
         t = coast_target(inp, zone, mode, precool)
         if t is not None:
             return t
+    if precool and forecast_aware:
+        # The model isn't trusted yet, so the forecast can't say how deep is safe: a pre-cool then
+        # goes no deeper than an ordinary run, not the full precool_depth.
+        return _depth_target(inp, zone, mode, precool, depth=min(s.precool_depth, s.cool_depth))
     return _depth_target(inp, zone, mode, precool)
 
 

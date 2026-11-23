@@ -173,7 +173,9 @@ def test_solar_precool_on_hot_afternoon():
     now = day.replace(hour=14, minute=0)
     d = plan(mk(now, zones(23.5, 23.0), f, 34, surplus=4000, cloud=0))
     assert d.action == "cool" and d.precool, d.reason
-    assert d.zone_commands["nursery"].setpoint == 22.0  # 25 - 3.0, overnight band applies by 17:30
+    # overnight band applies by 17:30; the thin model means no forecast-aware target yet, so the
+    # pre-cool goes no deeper than an ordinary run (25 - 1.5), not the full precool depth (25 - 3.0)
+    assert d.zone_commands["nursery"].setpoint == 23.0
     d2 = plan(mk(now, zones(23.5, 23.0), f, 34, surplus=1000, cloud=0))
     assert d2.action == "off"
 
@@ -598,8 +600,8 @@ def test_falls_back_to_the_fixed_depth():
     assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False) == 22.5
     inp, z = _coast(24.5, cold, tier=3)
     assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False)
-    inp, z = _coast(24.5, cold)
-    assert pl._target(inp, z, "cool", True) == pl._depth_target(inp, z, "cool", True)  # pre-cool
+    inp, z = _coast(24.5, cold, n_passive=10)  # pre-cool, thin model: no deeper than an ordinary run
+    assert pl._target(inp, z, "cool", True) == pl._depth_target(inp, z, "cool", False) == 22.5
     inp, z = _coast(24.5, cold, coast_target=False)
     assert pl._target(inp, z, "cool", False) == pl._depth_target(inp, z, "cool", False)
 
@@ -749,7 +751,7 @@ def test_running_precool_ignores_the_tier_two_room():
     now, f = _hot_day()
     d = _running_precool(now, f, nursery=22.0, master=24.9, surplus=4000)
     assert d.action == "off" and "complete" in d.reason
-    d = _running_precool(now, f, nursery=22.6, master=22.0, surplus=4000)
+    d = _running_precool(now, f, nursery=23.9, master=22.0, surplus=4000)
     assert d.action == "cool" and d.precool and "Nursery" in d.reason
 
 
@@ -848,3 +850,22 @@ def test_the_hard_limit_overrides_the_cap():
 
 def test_the_cap_applies_only_to_what_the_controller_reports():
     assert _night_run(master=25.6, capped=["nursery"]).zone_commands["master"].on
+
+
+# ------------------------------------------------------------------ forecast-aware pre-cool
+def test_precool_on_a_cold_night_aims_shallow():
+    """The same logic as an ordinary run: a night that cools the room by itself needs little banked."""
+    inp, z = _coast(24.5, [(0, 8), (14, 8)])
+    assert pl._depth_target(inp, z, "cool", True) == 21.0  # the fixed pre-cool depth: 24 - 3.0
+    assert pl._target(inp, z, "cool", True) == 23.5  # even this falls below the band by morning: the shallowest is chosen
+
+
+def test_precool_on_a_hot_night_may_go_to_the_full_precool_depth():
+    inp, z = _coast(24.5, [(0, 36), (14, 36)])
+    assert pl._target(inp, z, "cool", True) <= 22.5
+    assert pl._target(inp, z, "cool", True) >= pl._depth_target(inp, z, "cool", True)  # never deeper than precool_depth
+
+
+def test_precool_with_the_forecast_aware_target_off_keeps_the_full_depth():
+    inp, z = _coast(24.5, [(0, 8), (14, 8)], coast_target=False)
+    assert pl._target(inp, z, "cool", True) == 21.0
