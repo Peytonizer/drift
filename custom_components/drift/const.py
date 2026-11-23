@@ -33,6 +33,8 @@ CONF_AUTOMATIONS_TO_DISABLE = "automations_to_disable"
 # --- tuning options ---
 CONF_MIN_RUN = "min_run_minutes"
 CONF_MIN_OFF = "min_off_minutes"
+CONF_TIER2_CAP = "tier2_cap_minutes"
+CONF_TIER2_COOLDOWN = "tier2_cooldown_minutes"
 CONF_COOL_DEPTH = "cool_depth"
 CONF_HEAT_DEPTH = "heat_depth"
 CONF_PRECOOL_DEPTH = "precool_depth"
@@ -57,6 +59,8 @@ DEFAULTS = {
     CONF_GRID_IMPORT_NEGATIVE: True,
     CONF_MIN_RUN: 30,
     CONF_MIN_OFF: 20,
+    CONF_TIER2_CAP: 45,
+    CONF_TIER2_COOLDOWN: 60,
     CONF_COOL_DEPTH: 1.5,
     CONF_HEAT_DEPTH: 1.5,
     CONF_PRECOOL_DEPTH: 3.0,

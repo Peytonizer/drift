@@ -67,6 +67,10 @@ class Settings:
     precool_stop_after_min: float = 10  # the surplus must stay low this long before a pre-cool ends (a passing cloud isn't the sun going)
     allow_cooling: bool = True
     allow_heating: bool = True
+    # IDEAS 16: a tier 2 zone stops at its target OR after this many minutes open, then stays shut for the
+    # cool-down. For a big room with the door always open, whose sensor may never reach target.
+    tier2_cap_min: int = 45  # 0 turns the cap off
+    tier2_cooldown_min: int = 60
     # Forecast-aware target (IDEAS 14): aim for the shallowest target from which the room's own
     # drift stays in band for coast_horizon_h, instead of always cool_depth below the band edge.
     coast_target: bool = True
@@ -97,6 +101,8 @@ class PlanInput:
     running_precool: bool = False
     solar_surplus_w: float | None = None  # export available if AC were off
     solar_low_min: float = 0.0  # minutes the surplus has stayed below the pre-cool stop level
+    # Zones that hit their run cap and are in the cool-down (the controller keeps the clocks)
+    capped_zones: frozenset[str] = frozenset()
     settings: Settings = field(default_factory=Settings)
     # False when the run in progress wasn't started by Drift (inherited across a restart or begun
     # by a person): the minimum-run hold exists to protect the compressor from Drift's own
@@ -409,7 +415,9 @@ def _setpoint_for(inp: PlanInput, mode: str, target: float) -> float:
     return float(min(max(sp, inp.min_setpoint), inp.max_setpoint))
 
 
-def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) -> tuple[dict[str, ZoneCommand], str | None]:
+def _zone_commands(
+    inp: PlanInput, mode: str, precool: bool, needing: set[str], capped: frozenset[str] = frozenset()
+) -> tuple[dict[str, ZoneCommand], str | None]:
     s = inp.settings
     cmds: dict[str, ZoneCommand] = {}
     zones = [z for z in inp.zones if z.temp is not None]
@@ -420,6 +428,8 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
             # Constant zones are how the AC relieves duct pressure; leaving them on (with a
             # setpoint) lets its controller open them whenever it needs to.
             on = True
+        elif z.zone_id in capped:
+            on = False  # it hit its run cap: shut until the cool-down ends
         elif z.zone_id in needing:
             on = True
         elif z.tier == 2:
@@ -433,7 +443,7 @@ def _zone_commands(inp: PlanInput, mode: str, precool: bool, needing: set[str]) 
     if open_count < s.min_open_zones:
         closed = [z for z in zones if not cmds[z.zone_id].on]
         # during a pre-cool the filler zones are the low-priority rooms, so the tier 2 room isn't cooled by default
-        closed.sort(key=lambda z: (-z.tier if precool else z.tier, -(z.temp or 0) if mode == "cool" else (z.temp or 0)))
+        closed.sort(key=lambda z: (z.zone_id in capped, -z.tier if precool else z.tier, -(z.temp or 0) if mode == "cool" else (z.temp or 0)))
         for z in closed[: s.min_open_zones - open_count]:
             cmds[z.zone_id].on = True
     # MyZone: highest-priority zone that still needs conditioning
@@ -472,10 +482,15 @@ def plan(inp: PlanInput) -> Decision:
     needs: list[Need] = []
     recoveries: list[Recovery] = []
     zones_by_id = {z.zone_id: z for z in inp.zones}
+    # A capped zone is left alone until its cool-down ends, except past the hard limit, which always acts.
+    capped = frozenset(
+        zid for zid in inp.capped_zones
+        if zid in zones_by_id and not any(_hard_violation(inp, zones_by_id[zid], m) for m in ("cool", "heat"))
+    )
     for z in inp.zones:
         traj = project_passive(inp, z)
         preds[z.zone_id] = traj
-        if traj:
+        if traj and z.zone_id not in capped:
             needs.extend(find_need(inp, z, traj, recoveries))
 
     due = [n for n in needs if n.latest_start <= now + step]
@@ -491,7 +506,7 @@ def plan(inp: PlanInput) -> Decision:
         if action in ("cool", "heat"):
             # a pre-cool opens the tier 1 room (and whatever the ductwork needs), not every room with a later need
             needing = {n.zone_id for n in needs if n.mode == action and (n.tier == 1 or not precool)}
-            d.zone_commands, d.myzone = _zone_commands(inp, action, precool, needing)
+            d.zone_commands, d.myzone = _zone_commands(inp, action, precool, needing, capped)
             d.driver_zone = d.myzone
         future = [n.latest_start for n in needs if n.latest_start > now]
         d.next_start = min(future) if future else None
@@ -528,6 +543,8 @@ def plan(inp: PlanInput) -> Decision:
                 continue
             if precool_run and z.tier != 1:
                 continue  # a pre-cool is for the tier 1 room only
+            if z.zone_id in capped:
+                continue  # it hit its cap: its target no longer keeps the AC running
             tgt = _target(inp, z, mode, precool_run)
             lo, hi = inp.band_fn(z.zone_id, now)
             if z.tier <= 2:
@@ -544,6 +561,9 @@ def plan(inp: PlanInput) -> Decision:
             why = "pre-cool switched off" if not s.precool_enabled else "solar surplus has dropped"
             return build("off", f"Pre-cool stopped: {why}")
         if not unsatisfied:
+            hit = [zones_by_id[zid].name for zid in sorted(capped)]
+            if hit:
+                return build("off", f"{mode.title()}ing stopped: {', '.join(hit)} hit the {s.tier2_cap_min}-minute run cap")
             return build("off", f"{mode.title()}ing complete: zones reached target")
         if not future_need and not hard:
             return build("off", f"Stopping {mode}: forecast says zones stay in band without it")

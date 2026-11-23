@@ -30,6 +30,8 @@ from .const import (
     CONF_MIN_OFF,
     CONF_MIN_OPEN_ZONES,
     CONF_MIN_RUN,
+    CONF_TIER2_CAP,
+    CONF_TIER2_COOLDOWN,
     CONF_MYZONE_SELECT,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_TIME,
@@ -176,6 +178,8 @@ class DriftController:
         # sleep-safe watchdog: recent tier 1 readings with the band each was taken under (not persisted)
         self._t1_series: list[watchdog.Reading] = []
         self._solar_low_since: datetime | None = None  # when the spare solar fell below the pre-cool stop level
+        self._zone_open_since: dict[str, datetime] = {}  # tier 2 run-cap clocks (IDEAS 16)
+        self._zone_capped_until: dict[str, datetime] = {}
         self._t1_sensor_down_since: datetime | None = None
         self._last_control: datetime | None = None
         self.bootstrap_info: dict | None = None
@@ -962,6 +966,48 @@ class DriftController:
             z.prev = (now, temp)
         self._last_learn_mode = self.ac_mode_actual
 
+    # ------------------------------------------------------------------ tier 2 run cap (IDEAS 16)
+    def _update_caps(self, now: datetime) -> frozenset[str]:
+        """Zone ids of tier 2 rooms that have been open for the cap and are in the cool-down.
+
+        The clock runs while the AC is running and the zone is open, whoever opened it. At the cap
+        the zone is shut and held shut for the cool-down, so a room whose sensor never reaches
+        target can't keep the AC going. In memory only: a restart forgets it, which at worst
+        gives that room one more capped run.
+        """
+        cap = int(self.cfg[CONF_TIER2_CAP])
+        cool = timedelta(minutes=int(self.cfg[CONF_TIER2_COOLDOWN]))
+        running = self.ac_mode_actual in ACTIVE_MODES
+        capped: set[str] = set()
+        for z in self.zones:
+            zid = z.climate_id
+            if z.tier != 2 or cap <= 0:
+                self._zone_open_since.pop(zid, None)
+                self._zone_capped_until.pop(zid, None)
+                continue
+            until = self._zone_capped_until.get(zid)
+            if until is not None and now >= until:
+                self._zone_capped_until.pop(zid, None)
+                until = None
+            if until is not None:
+                capped.add(zid)
+                continue
+            st = self.hass.states.get(zid)
+            if not running or st is None or st.state == "off":
+                self._zone_open_since.pop(zid, None)
+                continue
+            since = self._zone_open_since.setdefault(zid, now)
+            if now - since >= timedelta(minutes=cap):
+                self._zone_capped_until[zid] = now + cool
+                self._zone_open_since.pop(zid, None)
+                capped.add(zid)
+                _LOGGER.info("%s reached its %d-minute run cap; shut until %s", z.name, cap, (now + cool).strftime("%H:%M"))
+        return frozenset(capped)
+
+    def zone_capped_until(self, z: Zone) -> str | None:
+        until = self._zone_capped_until.get(z.climate_id)
+        return until.strftime("%H:%M") if until else None
+
     # ------------------------------------------------------------------ control cycle
     def _settings(self) -> Settings:
         c = self.cfg
@@ -972,6 +1018,8 @@ class DriftController:
             precool_depth=float(c[CONF_PRECOOL_DEPTH]),
             min_run_min=int(c[CONF_MIN_RUN]),
             min_off_min=int(c[CONF_MIN_OFF]),
+            tier2_cap_min=int(c[CONF_TIER2_CAP]),
+            tier2_cooldown_min=int(c[CONF_TIER2_COOLDOWN]),
             start_lag_min=int(c[CONF_START_LAG]),
             tolerance_c=float(c[CONF_TOLERANCE]),
             recovery_max_c=float(c[CONF_RECOVERY_MAX]),
@@ -1006,6 +1054,7 @@ class DriftController:
             await self._async_refresh_forecast(now)
 
             surplus = self._surplus_now()
+            capped = self._update_caps(now)
 
             inp = PlanInput(
                 now=now,
@@ -1022,6 +1071,7 @@ class DriftController:
                 last_stop=self.last_stop,
                 running_precool=self.running_precool,
                 solar_surplus_w=surplus,
+                capped_zones=capped,
                 solar_low_min=(now - self._solar_low_since).total_seconds() / 60 if self._solar_low_since else 0.0,
                 settings=self._settings(),
                 run_is_ours=self.run_is_ours,

@@ -974,3 +974,50 @@ async def test_solar_dip_is_timed_from_when_the_surplus_first_fell_low(hass, fre
     await _minutes(hass, freezer, c, 2)
     assert c._solar_low_since is not None and c._solar_low_since > low_since  # a new dip, timed afresh
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+# ------------------------------------------------------------------ tier 2 run cap
+def _master_open(hass, on=True):
+    hass.states.async_set("climate.ac_master", "cool" if on else "off", {"temperature": 24, "hvac_modes": ["off", "cool"]})
+
+
+async def test_tier2_zone_is_capped_after_the_cap_and_released_after_the_cool_down(hass, freezer):
+    entry, c, _, _ = await _watch_setup(hass, freezer, at="2026-01-15 22:00:00+11:00", nursery=24.5)
+    zid = "climate.ac_master"
+    _master_open(hass)
+    c.ac_mode_actual = "cool"
+    now = dt_util.now()
+    assert c._update_caps(now) == frozenset()
+    assert c._update_caps(now + timedelta(minutes=44)) == frozenset()
+    assert c._update_caps(now + timedelta(minutes=45)) == frozenset({zid})  # 45-minute default
+    z = next(z for z in c.zones if z.climate_id == zid)
+    assert c.zone_capped_until(z) == (now + timedelta(minutes=105)).strftime("%H:%M")
+    assert c._update_caps(now + timedelta(minutes=100)) == frozenset({zid})
+    assert c._update_caps(now + timedelta(minutes=106)) == frozenset()  # cool-down over
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_the_cap_clock_stops_when_the_ac_or_the_zone_is_off(hass, freezer):
+    entry, c, _, _ = await _watch_setup(hass, freezer, at="2026-01-15 22:00:00+11:00", nursery=24.5)
+    now = dt_util.now()
+    _master_open(hass)
+    c.ac_mode_actual = "cool"
+    c._update_caps(now)
+    c.ac_mode_actual = "off"  # the run ended: the clock resets
+    assert c._update_caps(now + timedelta(minutes=30)) == frozenset()
+    c.ac_mode_actual = "cool"
+    assert c._update_caps(now + timedelta(minutes=50)) == frozenset()  # a fresh clock, not 50 minutes
+    _master_open(hass, on=False)
+    assert c._update_caps(now + timedelta(minutes=120)) == frozenset()
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_a_zero_cap_switches_the_cap_off(hass, freezer):
+    entry, c, _, _ = await _watch_setup(hass, freezer, at="2026-01-15 22:00:00+11:00", nursery=24.5)
+    c.cfg["tier2_cap_minutes"] = 0
+    _master_open(hass)
+    c.ac_mode_actual = "cool"
+    now = dt_util.now()
+    c._update_caps(now)
+    assert c._update_caps(now + timedelta(minutes=300)) == frozenset()
+    await hass.config_entries.async_unload(entry.entry_id)

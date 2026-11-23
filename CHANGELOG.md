@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Run cap for the tier 2 room. A tier 2 room now stops at its target *or* after 45 minutes open
+  (Tuning: "Tier 2 run cap", 0 turns it off), whichever comes first. Its zone is then shut for a
+  60-minute cool-down (Tuning: "Tier 2 cool-down") and its needs are ignored until it ends, so a
+  big room with its door always open, or a thermometer that never reaches target, can't keep the
+  AC running. If another room still needs the AC, the run carries on without the capped room; if
+  not, it stops with the reason "hit the 45-minute run cap". A room more than 1 °C past its band
+  edge is still cooled whatever the cool-down says. The clocks are in memory, so a restart resets
+  them. The status sensor shows `capped_until` for a room in its cool-down.
 - Sleep-safe watchdog. Overnight, independent of the planner and whether control is on, off or
   paused, Drift checks the tier 1 room's thermometer against the band in force at each reading.
   More than 1 °C outside for 15 continuous minutes, or more than 0.5 °C outside for 45, raises a

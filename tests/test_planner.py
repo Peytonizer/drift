@@ -802,3 +802,49 @@ def test_switching_the_precool_off_is_immediate_not_debounced():
     now, f = _hot_day()
     d = _running_precool(now, f, nursery=25.5, master=24.0, surplus=4000, low_min=0.0, precool_enabled=False)
     assert d.action == "off" and "switched off" in d.reason
+
+
+# ------------------------------------------------------------------ tier 2 run cap (IDEAS 16)
+def _night_run(master, nursery=23.0, capped=(), **kw):
+    from dataclasses import replace
+
+    now = datetime(2026, 1, 15, 22, 0, tzinfo=AEDT)
+    f = hot_forecast(now, {22: 30, 23: 29, 0: 28, 1: 27})
+    inp = mk(now, zones(nursery, master, others=24.0), f, 30, ac_mode="cool", ac_since=now - timedelta(minutes=50), **kw)
+    return plan(replace(inp, run_is_ours=True, capped_zones=frozenset(capped)))
+
+
+def test_a_run_for_the_tier_two_room_alone_stops_when_it_hits_the_cap():
+    d = _night_run(master=25.6)
+    assert d.action == "cool" and d.zone_commands["master"].on  # not capped: carries on to target
+    d = _night_run(master=25.6, capped=["master"])
+    assert d.action == "off" and "run cap" in d.reason and "Master" in d.reason
+
+
+def test_a_capped_tier_two_room_is_shut_while_another_room_still_needs_the_ac():
+    d = _night_run(master=25.6, nursery=25.4, capped=["master"])
+    assert d.action == "cool" and d.zone_commands["nursery"].on
+    assert not d.zone_commands["master"].on
+    assert sum(1 for c in d.zone_commands.values() if c.on) == 3  # ductwork still protected, by other rooms
+    assert d.myzone != "master"
+
+
+def test_cool_down_stops_the_tier_two_room_starting_a_run():
+    now = datetime(2026, 1, 15, 22, 0, tzinfo=AEDT)
+    f = hot_forecast(now, {22: 30, 23: 30, 0: 30, 1: 30})
+    inp = mk(now, zones(23.0, 25.6, others=24.0), f, 30, last_stop=now - timedelta(minutes=30))
+    assert plan(inp).action == "cool"  # it would start
+    from dataclasses import replace
+
+    d = plan(replace(inp, capped_zones=frozenset(["master"])))
+    assert d.action == "off" and not d.needs
+
+
+def test_the_hard_limit_overrides_the_cap():
+    """Master 1 °C past its band edge (25 + 1.0) is cooled regardless of the cool-down."""
+    d = _night_run(master=26.4, capped=["master"])
+    assert d.action == "cool" and d.zone_commands["master"].on
+
+
+def test_the_cap_applies_only_to_what_the_controller_reports():
+    assert _night_run(master=25.6, capped=["nursery"]).zone_commands["master"].on

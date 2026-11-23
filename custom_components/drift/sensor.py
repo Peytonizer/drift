@@ -71,6 +71,7 @@ class StatusSensor(DriftEntity, SensorEntity):
                     "temp": c.zone_temp(z),
                     "band": c.band(z, dt_util.now()),
                     **({"door": _door_label(c.door_closed(z))} if z.door_sensor_id else {}),
+                    **({"capped_until": c.zone_capped_until(z)} if c.zone_capped_until(z) else {}),
                     "command": (
                         {
                             "on": d.zone_commands[z.climate_id].on,

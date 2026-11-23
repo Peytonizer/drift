@@ -10,6 +10,7 @@ Status: unreleased. Installed and running in shadow mode.
 - **Lets rooms cool or warm naturally when they can.** It only starts the AC at the latest moment that still keeps the room in band. A room that is already a little outside its band (up to 0.7 °C) is left alone if the forecast has it back inside within 45 minutes on its own. A slight excursion (within the tolerance, 0.3 °C by default) is left alone however long it lasts, as long as the room comes back on its own within the 6-hour look-ahead; this works the same way for heating. Beyond 1 °C it always acts.
 - **Is ready on time.** It pre-cools or pre-heats before the overnight window starts, so the priority room is already in band at bedtime.
 - **Prevents short-cycling.** It runs in proper blocks, with a minimum run time, a minimum off time, and a target set below the band edge.
+- **Caps the tier 2 room's run.** A big room that never reaches target can't keep the AC going: its zone stops at target or after the run cap (45 minutes by default), then stays shut for a cool-down.
 - **Uses tiers to decide which rooms get air:**
   - Tier 1 (e.g. a child's bedroom) is held tightly in band, and its zone is the MyZone.
   - Tier 2 (e.g. the main bedroom) gets air when it's drifting.
@@ -60,7 +61,7 @@ It starts **disabled (shadow mode)**. Watch `sensor.drift_status` → `reason`, 
 | Bands: tier 1/2/3 overnight, daytime guard | Number entities on the device page (editing tier 1 by hand switches TOG to *Manual*) |
 | Overnight window | Time entities (default 17:30 → 07:00) |
 | Control on/off, solar pre-cool | Switches |
-| Run/off times, depths, tolerance, natural recovery, tariffs, heating/cooling allowed | Configure → Tuning |
+| Run/off times, tier 2 run cap and cool-down, depths, tolerance, natural recovery, tariffs, heating/cooling allowed | Configure → Tuning |
 | TOG chart, bedtime notification | Configure → Sleepwear (TOG) |
 | Zone tiers, sensors, meter | Configure → Zones / Energy |
 

@@ -80,6 +80,8 @@
         "data": {
           "min_run_minutes": "Minimum run time",
           "min_off_minutes": "Minimum off time",
+          "tier2_cap_minutes": "Tier 2 run cap (a tier 2 room stops at target or after this long, whichever is first; 0 = no cap)",
+          "tier2_cooldown_minutes": "Tier 2 cool-down after a cap (the room stays shut this long)",
           "start_lag_minutes": "Start lag (extra lead before a forecast breach)",
           "cool_depth": "Cool depth (target = band max − this)",
           "heat_depth": "Heat depth (target = band min + this)",
