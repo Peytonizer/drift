@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-11-27
+
+First release: the code that has been in control, without a manual override, since 23 November 2026.
 
 - Pre-cool is forecast-aware. It now aims for the shallowest target from which the tier 1 room's
   own drift stays in band for the next 12 hours (the same rule an ordinary run uses), and

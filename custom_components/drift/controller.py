@@ -293,7 +293,7 @@ class DriftController:
 
     @callback
     def _on_schedule_change(self, event: Event) -> None:
-        # A block starting or ending, or Matt editing the helper: re-read and re-plan.
+        # A block starting or ending, or someone editing the helper: re-read and re-plan.
         async def _go():
             await self._async_refresh_schedules()
             await self._async_control(dt_util.now())

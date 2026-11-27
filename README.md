@@ -2,7 +2,7 @@
 
 Forecast-aware, tiered climate control for zoned ducted AC in Home Assistant, built and tested against Advantage Air / MyAir. All logic runs locally in Home Assistant; only the weather forecast comes from the internet.
 
-Status: unreleased. Installed and running in shadow mode.
+Status: 1.0.0. Running with control on since 22 November 2026; it starts in shadow mode on a new install.
 
 ## What it does
 
